@@ -1,0 +1,647 @@
+// 战斗场景 = 原 game/battle.html 的模块脚本原样搬进 SPA。
+// AS3 原始放置规则 (vendor/seer2-origin-as3):
+//   Fighter.as:93-98  LEFT  {x:120,y:50,scaleX:1}    RIGHT {x:root.width-120,y:50,scaleX:-1}
+//   FighterAnimation.setup: fight影片 addChild 到容器原点,零偏移零缩放 → 位置由 fight SWF 内部美术坐标决定
+//   地图SWF舞台实测 1200x660 = 原版 root 尺寸 (ArenaUIController stageWidth/1200, stageHeight/660)
+// petContainer.root.swf = petContainer.swf 经 tools/patch-swf-stage.mjs 头手术:
+//   舞台 500x375 → 1200x660,其 Fight.as 的 offsetX/offsetY/scaleX 参数即原版 Fighter 锚点+镜像。
+// 规则层 = TS 内核 battle-kernel.js (globalThis.BattleKernel); 表现层 = 原版 fightUI + fight SWF。
+// 数值来自 game/data/pets.json + rules.json; 元游戏(队伍/道具/抓捕/经验)走 game/logic/ 纯函数层。
+// 战果不再走 sessionStorage: 写 APP.lastResult, 地图场景挂载时消费一次 (同进程, 无需跨页)。
+import * as LOGIC from '/game/logic/phases/index.js'
+import * as SESSION from '/game/logic/session.js'
+import * as SETTLE from '/game/logic/settle.js'
+import { makeRng } from '/game/logic/rng.js'
+import { calcMaxHp } from '/game/logic/stats.js'
+import * as CONTENT from '../content.js'
+import { APP } from '../state.js'
+import { go } from '../router.js'
+
+const ROOT_W = 1200, ROOT_H = 660
+const CAT_CN = { Physical: '物理', Special: '魔法', Status: '属性', Climax: '必杀' }
+const LEVEL = 100
+
+const state = { players: {} }
+const battle = { K: null, armed: false, over: false, settled: false, states: { fL: [], fR: [] }, playerSide: null, cfg: {} }
+// ---- 野战(单机闭环)态 ----
+const wild = { on: false, S: null, deps: null, uidByPet: new Map(), petByUid: new Map(), activeSwf: null }
+
+let P = new URLSearchParams()
+let WILD = null
+let panelEl = null, settleEl = null
+let PETS = null, RULES = null
+
+function logLine(t) {
+  console.log(t)
+}
+
+async function loadData() {
+  if (PETS && RULES) return PETS
+  PETS = await (await fetch('/game/data/pets.json')).json()
+  RULES = await (await fetch('/game/data/rules.json')).json()
+  await CONTENT.loadContent()
+  return PETS
+}
+
+// 由精灵 id 构造内核配置。**数值权威 = 重启表** (game/data/unity/*, lite_4.9.2):
+// 能力值走移植后的 Status.cs:385-391 公式, 技能直接读重启 Skill.csv 的 power/accuracy/type。
+// 重启表里没有的 id (官方独占的那批, 例如野怪池缺的 7 只) 退回官方表, 页面不因换宇宙而开不了局。
+function petConfig(id, level = LEVEL, unlock = false) {
+  if (CONTENT.hasPet(id)) return CONTENT.petConfig(id, level, { unlockedOnly: unlock })
+  const db = PETS
+  const m = db.monsters[id] || db.monsters[1]
+  let list = (m.skillIds || []).map((i, idx) => { const s = db.skills[i]; return s ? { ...s, baseId: i, unlockLv: 1 + idx * (RULES ? RULES.skillUnlock.levelsPerSkill : 20) } : null }).filter(Boolean)
+  if (unlock) {
+    const ok = list.filter(s => s.unlockLv <= level)
+    if (ok.length) list = ok
+    else list = list.slice(0, 1)   // 至少留首个技
+  }
+  const super1 = list.find(s => s.category === 'Climax')
+  const normals = list.filter(s => s.category !== 'Climax').slice(0, 4)
+  const picked = super1 ? [...normals, super1] : normals
+  return {
+    name: m.name, swfId: m.id, level, element: m.element, stats: m.stats,
+    skills: picked.map(s => ({ name: s.name, power: s.power, accuracy: s.accuracy, rage: s.rage, category: s.category, element: s.element, desc: s.tips, baseId: s.baseId })),
+  }
+}
+
+function waitCallback(instanceId, timeout = 20000) {
+  return new Promise(resolve => {
+    const h = e => { if (e.data?.instanceId === instanceId && e.data.type === 'petRenderCallbacksReady') { removeEventListener('message', h); resolve() } }
+    addEventListener('message', h)
+    setTimeout(() => { removeEventListener('message', h); resolve() }, timeout)
+  })
+}
+
+async function makeFighter(instanceId, petId, x, mirror) {
+  const box = document.getElementById(instanceId)
+  box.innerHTML = ''
+  const p = window.RufflePlayer.newest().createPlayer()
+  box.appendChild(p)
+  const params = new URLSearchParams({ url: `/swf/fight/${petId}.swf`, instanceId, scale: 'noScale', offsetX: String(x), offsetY: '50', scaleX: mirror ? '-1' : '1', scaleY: '1' })
+  const cb = waitCallback(instanceId)
+  await p.ruffle().load({ url: '/game/petContainer.root.swf?' + params, allowScriptAccess: true, wmode: 'transparent', autoplay: 'on', unmuteOverlay: 'hidden', scale: 'noScale', menu: false }).catch(() => {})
+  await cb
+  state.players[instanceId] = p
+  return p
+}
+
+// 换宠装卸 fight SWF (原版 PetChange 语义): 只换右侧容器参数, 重建 player
+async function reloadFighter(instanceId, petSwfId, x, mirror) {
+  await makeFighter(instanceId, petSwfId, x, mirror)
+  const inst = instanceId
+  try { battle.states[inst] = await state.players[inst]?.getAvailableStates?.() } catch (e) { battle.states[inst] = [] }
+}
+
+// 原版战斗 UI 层 (fightUI.swf: New UI 血条/怒气条 + NewFightControlPanel 技能/功能按钮)
+async function loadFightUI() {
+  if (state.players.ui) return state.players.ui
+  const box = document.getElementById('ui')
+  const p = window.RufflePlayer.newest().createPlayer()
+  box.appendChild(p)
+  const ready = new Promise(r => {
+    const h = e => { if (e.data?.type === 'fightUIReady') { removeEventListener('message', h); r() } }
+    addEventListener('message', h)
+    setTimeout(() => { removeEventListener('message', h); r() }, 15000)
+  })
+  const q = new URLSearchParams({ uiUrl: '/swf/ui/UI_Arena.swf', instanceId: 'ui' })
+  await p.ruffle().load({ url: '/game/fightui/fightUI.swf?' + q, allowScriptAccess: true, wmode: 'transparent', autoplay: 'on', unmuteOverlay: 'hidden', scale: 'noScale', menu: false }).catch(() => {})
+  await ready
+  state.players.ui = p
+  return p
+}
+
+function updateFightUI(left, right, skills) {
+  const p = state.players.ui
+  if (!p?.setFighter) return
+  p.setFighter('left', left.name, left.level, left.hp, left.maxHp, left.anger, left.maxAnger)
+  p.setFighter('right', right.name, right.level, right.hp, right.maxHp, right.anger, right.maxAnger)
+  if (skills) p.setSkills(skills)
+}
+
+// 依据可用状态名挑一个最贴近的动作 (SWF 状态名不固定,模糊匹配)
+function pickState(list, kinds) {
+  for (const k of kinds) for (const s of list) if (s.indexOf(k) >= 0) return s
+  return null
+}
+function animFighter(instanceId, kinds) {
+  const p = battle.states[instanceId]
+  const s = pickState(p || [], kinds)
+  if (s) { try { Promise.resolve(state.players[instanceId]?.setState?.(s)).catch(() => {}) } catch (e) {} }
+}
+function sideToInstance(side) { return side === 'right' ? 'fR' : 'fL' }
+
+async function syncUI() {
+  const st = await battle.K.snapshot()
+  battle.lastSt = st
+  const L = st.players[0], R = st.players[1]
+  const lp = L.team.find(t => t.id === L.activePet) || L.team[0]
+  const rp = R.team.find(t => t.id === R.activePet) || R.team[0]
+  updateFightUI(
+    { name: L.name, level: lp.level, hp: lp.currentHp, maxHp: lp.maxHp, anger: L.rage, maxAnger: L.maxRage },
+    { name: R.name, level: rp.level, hp: rp.currentHp, maxHp: rp.maxHp, anger: R.rage, maxAnger: R.maxAnger },
+    (lp.skills || []).map(s => ({ name: s.name, anger: s.rage, power: s.power, category: CAT_CN[s.category] || s.category })),
+  )
+  renderCards(L.activePet, lp)
+}
+
+// 技能读数条。数据源是 **battle.cfgByPet** (重启表算出来的出战配置), 不是内核 snapshot ——
+// 内核自带一套 packs 数值, 用它读到的命中会回到旧宇宙, 这条判据就白做了。
+function renderCards(activePetId, lp) {
+  const el = document.getElementById('cards')
+  if (!el) return
+  const cfg = battle.cfgByPet?.get(String(activePetId))
+  const skills = cfg?.skills || lp?.skills || []
+  el.textContent = ''
+  skills.forEach((s, i) => {
+    const b = document.createElement('button')
+    const nm = document.createElement('b'); nm.textContent = s.name
+    b.append(nm, document.createTextNode(` 威力${s.power} 命中${s.accuracy ?? '-'} 怒气${s.rage ?? 0} ${CAT_CN[s.category] || s.category}`))
+    b.title = s.desc || ''
+    b.onclick = () => takeTurn(i)
+    el.append(b)
+  })
+  const src = document.createElement('span')
+  src.className = 'src'
+  src.textContent = `内容 = 阿卡迪亚：重启 ${CONTENT.contentVersion()} · ${cfg ? '六维 ' + JSON.stringify(cfg.stats) : '官方表'}`
+  el.append(src)
+}
+
+function onKernelMessage(m) {
+  const d = m.data || {}
+  logLine(`[${m.type}] ` + JSON.stringify(d).slice(0, 160))
+  switch (m.type) {
+    case 'SKILL_USE': {
+      const inst = sideToInstance(battle.K.sideOfPet(d.user))
+      animFighter(inst, ['必杀', '魔法', '物理攻击', '攻击', '技'])
+      break
+    }
+    case 'DAMAGE': {
+      const inst = sideToInstance(battle.K.sideOfPet(d.target))
+      animFighter(inst, ['被击', '被打', '受', '暴击'])
+      break
+    }
+    case 'PET_DEFEATED': {
+      const inst = sideToInstance(battle.K.sideOfPet(d.pet))
+      animFighter(inst, ['死亡', '失败', '倒下'])
+      break
+    }
+    case 'PET_SWITCH': {
+      const petId = d.toPet ?? d.pet
+      if (wild.on && petId && battle.K.sideOfPet(petId) === 'left') {
+        const meta = battle.K.petMeta(petId)
+        if (meta && meta.swfId !== wild.activeSwf) {
+          wild.activeSwf = meta.swfId
+          reloadFighter('fL', meta.swfId, 120, false).then(() => animFighter('fL', ['待机', 'idle', '空']))
+        }
+      }
+      break
+    }
+    case 'BATTLE_END': {
+      battle.over = true
+      const winSide = battle.playerSide && battle.playerSide.get(d.winner)
+      const winInst = winSide === 'right' ? 'fR' : 'fL'
+      animFighter(winInst, ['胜利'])
+      state.players.ui?.setActive?.(false)
+      const winName = winSide === 'right' ? battle.cfg.right?.name : battle.cfg.left?.name
+      logLine(`★ 战斗结束 · ${winName} 胜 · ${d.reason || ''}`)
+      if (wild.on && !battle.settled) settleWild(winSide === 'left' ? 'win' : 'lose')
+      break
+    }
+  }
+  syncUI().catch(() => {})
+}
+
+async function armTurn() {
+  battle.armed = true
+  state.players.ui?.setActive?.(true)
+}
+
+async function takeTurn(skillIndex) {
+  if (!battle.armed || battle.over) return
+  battle.armed = false
+  state.players.ui?.setActive?.(false)
+  try {
+    const lp = battle.lastSt?.players[0]?.team?.find(t => t.id === battle.lastSt.players[0].activePet) || battle.lastSt?.players[0]?.team?.[0]
+    const sk = (lp?.skills || [])[skillIndex]
+    const skillId = sk ? (sk.baseId ?? sk.id) : null
+    if (wild.on && lp) LOGIC.dispatch(wild.deps, wild.S, { type: 'battle.turn', actorUids: [wild.uidByPet.get(String(lp.id))].filter(Boolean) })
+    if (skillId) await battle.K.playSkill('left', String(skillId))
+  } catch (e) {
+    console.warn('takeTurn left', e)
+    // 指定技能不可用(怒气不足等) → 退化为任一可行动技能
+    try {
+      const alt = (await battle.K.available('left')).find(s => s.type === 'use-skill')
+      if (alt) await battle.K.playSkill('left', String(alt.skill))
+      else throw new Error('left 无任何 use-skill')
+    } catch (e2) {
+      if (wild.on && !battle.over) await maybeSurrenderIfStuck()
+      if (!battle.over) { battle.armed = true; state.players.ui?.setActive?.(true) }
+      return
+    }
+  }
+  try { await enemyAct() } catch (e) { console.warn('takeTurn right', e) }
+  if (wild.on && !battle.over) await maybeSurrenderIfStuck()
+  await new Promise(r => setTimeout(r, 700))
+  await syncUI()
+  if (!battle.over) armTurn()
+}
+
+// 敌方出手 (简单 AI: 攻击技 → 换宠窗 → 过回合 → 无奈认输)
+async function enemyAct() {
+  const rs = await battle.K.available('right')
+  const sk = rs.find(s => s.type === 'use-skill')
+  if (sk) { await battle.K.playSkill('right', sk.skill); return }
+  const sw = rs.find(s => s.type === 'switch-pet')
+  if (sw) { await battle.K.switchPet('right', String(sw.pet)); return }
+  const dn = rs.find(s => s.type === 'do-nothing')
+  if (dn) { await battle.K.submit(dn.raw); return }
+  const su = rs.find(s => s.type === 'surrender')
+  if (su) await battle.K.submit(su.raw)
+}
+
+// 我方陷入无可行动窗口 (全灭待换宠) → 认输结束战斗 (原版战败结算语义)
+async function maybeSurrenderIfStuck() {
+  try {
+    const av = await battle.K.available('left')
+    if (av.some(s => s.type === 'use-skill' || s.type === 'switch-pet' || s.type === 'team-selection')) return false
+    const su = av.find(s => s.type === 'surrender')
+    if (su) { logLine('队伍无法作战, 判定战败'); await battle.K.submit(su.raw); return true }
+  } catch (e) { console.warn('maybeSurrender', e) }
+  return false
+}
+
+// 出手类动作(道具/抓捕/逃跑失败)接敌方回合一回合
+async function spendTurn() {
+  try {
+    const av = await battle.K.available('left')
+    const dn = av.find(s => s.type === 'do-nothing')
+    if (dn) await battle.K.submit(dn.raw)
+    else { logLine('(内核无 do-nothing 选项, 本次动作未消耗回合)'); await syncUI(); if (!battle.over) armTurn(); return }
+  } catch (e) { console.warn('spendTurn', e); if (!battle.over) armTurn(); return }
+  try { await enemyAct() } catch (e) { console.warn('spendTurn enemy', e) }
+  await new Promise(r => setTimeout(r, 700))
+  await syncUI()
+  if (!battle.over) armTurn()
+}
+
+// ---- 左方内核宠 ↔ 存档 uid 映射 ----
+function activeLeftUid() {
+  const L = battle.lastSt?.players[0]
+  if (!L) return null
+  return wild.uidByPet.get(String(L.activePet)) || null
+}
+function leftHpSnap() {
+  const out = {}
+  const L = battle.lastSt?.players[0]
+  for (const pet of L?.team || []) {
+    const uid = wild.uidByPet.get(String(pet.id))
+    if (uid) out[uid] = pet.currentHp
+  }
+  return out
+}
+
+function closePanel() { panelEl.style.display = 'none'; panelEl.innerHTML = '' }
+function showPanel(title, rows) {
+  panelEl.innerHTML = ''
+  const h = document.createElement('h3'); h.textContent = title
+  const box = document.createElement('div'); box.className = 'row'
+  for (const r of rows) {
+    const b = document.createElement('button')
+    b.textContent = r.label
+    if (r.disabled) b.disabled = true
+    else b.onclick = () => { closePanel(); r.onClick() }
+    box.append(b)
+  }
+  const x = document.createElement('button'); x.textContent = '关闭'
+  x.onclick = () => { closePanel(); if (battle.armed && !battle.over) state.players.ui?.setActive?.(true) }
+  box.append(x)
+  panelEl.append(h, box)
+  panelEl.style.display = 'block'
+  state.players.ui?.setActive?.(false)
+}
+
+function ownedItems(ruledItems) {
+  return ruledItems.filter(it => it.itemId != null && SESSION.countItem(wild.S, it.itemId) > 0)
+}
+
+async function hubClick(hub) {
+  if (!wild.on) { logLine(`(hub:${hub} 演示模式无背包/抓捕, 载入野战URL后可用)`); return }
+  if (hub === 'fight') { closePanel(); return }
+  if (!battle.armed || battle.over) { logLine('现在不能操作 (等待回合结算)'); return }
+  if (hub === 'item') {
+    const rows = ownedItems([...RULES.items.heals, ...(RULES.items.rage || []), ...(RULES.items.combo || [])])
+      .map(p => ({ label: `${p.name} ×${SESSION.countItem(wild.S, p.itemId)}`, onClick: () => doPotion(p.itemId) }))
+    if (!rows.length) rows.push({ label: '没有可用药剂', onClick: () => {} })
+    showPanel('道具', rows)
+  }
+  if (hub === 'catch') {
+    const rows = ownedItems(RULES.items.captureBalls)
+      .map(b => ({ label: `${b.name} ×${SESSION.countItem(wild.S, b.itemId)}${b.maxWildLevel ? `(≤${b.maxWildLevel}级)` : ''}`, onClick: () => doCapture(b.itemId) }))
+    if (!rows.length) rows.push({ label: '没有胶囊 (去商店/M4)', disabled: true, onClick: () => {} })
+    showPanel('扔出胶囊', rows)
+  }
+  if (hub === 'pet') {
+    const L = battle.lastSt?.players[0]
+    const rows = (L?.team || []).map(t => {
+      const uid = wild.uidByPet.get(String(t.id))
+      const isAct = t.id === L.activePet
+      return { label: `${t.name} Lv${t.level} ${t.currentHp}/${t.maxHp}${isAct ? ' (出战)' : ''}`, disabled: isAct || t.currentHp <= 0, onClick: () => doSwitch(t.id) }
+    })
+    showPanel('替换精灵', rows)
+  }
+  if (hub === 'escape') doEscape()
+}
+
+async function doPotion(itemId) {
+  const uid = activeLeftUid()
+  const L = battle.lastSt?.players[0]
+  const pid = L?.activePet
+  if (!uid || !pid) return
+  try {
+    const cur = battle.K.hp(pid)
+    const ev = LOGIC.dispatch(wild.deps, wild.S, { type: 'item.use', uid, itemId, currentHp: cur.current })[0]
+    if (ev.heal > 0) battle.K.setHp(pid, ev.targetHp)
+    if (ev.rage > 0) { const r = battle.K.rage('left'); battle.K.setRage('left', r.current + ev.rage) }
+    logLine(`使用 ${ev.item}: 体力 +${ev.heal}${ev.rage ? ` 怒气 +${ev.rage}` : ''}`)
+    SESSION.saveSession(localStorage, wild.S)
+  } catch (e) { logLine('道具失败: ' + e); return }
+  await spendTurn()
+}
+
+async function doCapture(itemId) {
+  const R = battle.lastSt?.players[1]
+  const rpid = R?.activePet
+  if (!rpid) return
+  const cur = battle.K.hp(rpid)
+  let ev
+  try {
+    ev = LOGIC.dispatch(wild.deps, wild.S, { type: 'capture.attempt', itemId, wildHp: cur.current, wildHpMax: cur.max })
+  } catch (e) { logLine('抓捕失败: ' + e); return }
+  const roll = ev.find(x => x.type === 'capture.roll')
+  logLine(`扔出 ${roll.ball} · 概率 ${roll.prob.toFixed(0)}% 掷点 ${roll.roll.toFixed(1)} → ${roll.success ? '抓到!' : '没抓到'}`)
+  SESSION.saveSession(localStorage, wild.S)
+  if (!roll.success) { await spendTurn(); return }
+  battle.settled = true
+  battle.over = true
+  await settleWild('capture')
+}
+
+async function doSwitch(kernelPetId) {
+  try { await battle.K.switchPet('left', String(kernelPetId)) } catch (e) { logLine('换宠失败: ' + e); return }
+  battle.armed = false
+  try { await enemyAct() } catch (e) { console.warn(e) }
+  await new Promise(r => setTimeout(r, 700))
+  await syncUI()
+  if (!battle.over) armTurn()
+}
+
+async function doEscape() {
+  const uid = activeLeftUid()
+  const ev = LOGIC.dispatch(wild.deps, wild.S, { type: 'escape.attempt', uid })
+  const r = ev[0]
+  if (!r.success) { logLine(`逃跑失败 (${(r.chance * 100) | 0}% 概率)`); SESSION.saveSession(localStorage, wild.S); await spendTurn(); return }
+  logLine('成功逃跑, 返回地图…')
+  SESSION.syncHp(wild.S, PETS, leftHpSnap())
+  SESSION.saveSession(localStorage, wild.S)
+  battle.settled = true; battle.over = true
+  writeResult({ outcome: 'escape', captured: null })
+  setTimeout(backToMap, 1200)
+}
+
+// ---- 战斗结算 (win/lose/capture 共路) ----
+async function settleWild(outcome) {
+  battle.settled = true
+  let events = []
+  try {
+    events = LOGIC.dispatch(wild.deps, wild.S, { type: 'battle.end', outcome, leftHp: leftHpSnap() })
+  } catch (e) { logLine('结算异常: ' + e) }
+  // 进化自动执行 (原版确认面板后置 M4+), 结果进浮层
+  for (const j of [...wild.S.evolve.pending]) {
+    const done = SETTLE.applyEvolution(RULES, PETS, wild.S, j.uid)
+    if (done) events.push(done)
+  }
+  SESSION.saveSession(localStorage, wild.S)
+  const settled = events.find(e => e.type === 'battle.settled')
+  writeResult({ outcome, captured: settled?.result?.captured || null })
+  showSettle(events, outcome)
+}
+
+function writeResult({ outcome, captured }) {
+  const L = battle.lastSt?.players[0]
+  APP.lastResult = {
+    ts: Date.now(),
+    wild: { petId: WILD.petId, level: WILD.level, slot: WILD.slot, back: WILD.back, map: P.get('map') || '' },
+    outcome, captured: captured || null,
+    left: {
+      hp: (L?.team || []).map(t => t.currentHp),
+      pets: (L?.team || []).map(t => battle.K.petMeta(t.id)?.swfId ?? 0),
+    },
+  }
+}
+function backToMap() { go('map', WILD.back ? { map: WILD.back } : null) }
+
+function showSettle(events, outcome) {
+  settleEl.innerHTML = ''
+  const h = document.createElement('h3')
+  h.textContent = outcome === 'capture' ? '抓捕成功 · 收入队伍' : outcome === 'win' ? '战斗胜利' : outcome === 'escape' ? '成功撤退' : '战败 · 精灵被全愈送回'
+  const ul = document.createElement('ul')
+  const lines = []
+  for (const e of events) {
+    if (e.type === 'exp.awarded') lines.push(`获得经验 ${e.total} (每只参战 +${e.share})`)
+    if (e.type === 'pet.levelup') {
+      const pet = SESSION.findPet(wild.S, e.uid)
+      lines.push(`${pet?.name ?? e.uid}: Lv${e.from} → Lv${e.to}`)
+    }
+    if (e.type === 'evolve.done') lines.push(`进化 → ${e.name}`)
+    if (e.type === 'capture.success') lines.push(`新伙伴入${e.where === 'team' ? '队伍' : '仓库'}`)
+  }
+  for (const t of lines) { const li = document.createElement('li'); li.textContent = t; ul.append(li) }
+  const b = document.createElement('button'); b.textContent = '返回地图'
+  b.style.marginTop = '8px'
+  b.onclick = backToMap
+  settleEl.append(h, ul, b)
+  settleEl.style.display = 'block'
+  setTimeout(backToMap, 8000)
+}
+
+// ---- 野战启动: 存档队伍 → 内核多宠队 ----
+async function startWildBattle() {
+  await import('/game/battle-kernel.js')
+  battle.K = globalThis.BattleKernel
+  battle.over = false; battle.settled = false
+  await loadData()
+  wild.on = true
+  if (!wild.S) wild.S = SESSION.loadSession(localStorage, PETS, RULES)
+  if (!wild.S.team.length) {
+    document.getElementById('hint').textContent = '队伍是空的 — 回地图恢复或清除存档'
+    return
+  }
+  wild.deps = { rules: RULES, pets: PETS, rng: makeRng('wild-' + Date.now() + '-' + Math.random()) }
+  const team = wild.S.team.slice(0, 6)
+  const leftPets = team.map(sp => petConfig(sp.petId, sp.level, true))
+  battle.cfg.left = { name: wild.S.trainer.name, pets: leftPets }
+  battle.cfg.right = petConfig(WILD.petId, WILD.level, false)
+  battle.K.events(onKernelMessage)
+  for (const inst of ['fL', 'fR']) {
+    try { battle.states[inst] = await state.players[inst]?.getAvailableStates?.() } catch (e) { battle.states[inst] = [] }
+  }
+  const info = await battle.K.start({ seed: 'w' + Date.now(), left: battle.cfg.left, right: battle.cfg.right })
+  battle.playerSide = new Map(info.players.map(p => [p.id, p.side]))
+  wild.uidByPet.clear(); wild.petByUid.clear()
+  battle.cfgByPet = new Map()
+  info.players[0].team.forEach((t, i) => {
+    wild.uidByPet.set(String(t.petId), team[i].uid)
+    wild.petByUid.set(team[i].uid, String(t.petId))
+    battle.cfgByPet.set(String(t.petId), leftPets[i])
+    // 上限血走重启公式 (Status.cs:385-391), 不再用官方 rules 的等级曲线
+    const cap = CONTENT.hasPet(team[i].petId) ? CONTENT.maxHpOf(team[i].petId, team[i].level) : calcMaxHp(PETS.monsters[team[i].petId].stats.hp, team[i].level)
+    const v = battle.K.setHp(String(t.petId), Math.max(1, Math.min(team[i].hp, cap)))
+    void v
+  })
+  battle.cfgByPet.set(String(info.players?.[1]?.team?.[0]?.petId), battle.cfg.right)
+  wild.activeSwf = team[0].swfId
+  LOGIC.dispatch(wild.deps, wild.S, { type: 'encounter.start', wild: { petId: WILD.petId, level: WILD.level, slot: WILD.slot, back: WILD.back, map: P.get('map') || '' } })
+  SESSION.saveSession(localStorage, wild.S)
+  await syncUI()
+  await armTurn()
+  document.getElementById('hint').textContent = `野外遭遇 · ${battle.cfg.right.name} Lv${WILD.level} · 技能/道具/换宠/抓捕/逃跑`
+}
+
+async function startKernelBattle() {
+  await import('/game/battle-kernel.js')
+  battle.K = globalThis.BattleKernel
+  battle.over = false
+  await loadData()
+  const idL = document.getElementById('id0').value | 0
+  const idR = document.getElementById('id1').value | 0
+  battle.cfg.left = petConfig(idL)
+  // 野怪用 1103 语义里带过来的等级, 内核按 base+level 重算属性 (原版也是服务端按等级算)
+  battle.cfg.right = petConfig(idR, WILD ? WILD.level : LEVEL)
+  battle.K.events(onKernelMessage)
+  // 采集两侧 fight SWF 的可用状态名 (动画映射用)
+  for (const inst of ['fL', 'fR']) {
+    try { battle.states[inst] = await state.players[inst]?.getAvailableStates?.() } catch (e) { battle.states[inst] = [] }
+  }
+  const info = await battle.K.start({ seed: 'demo', left: battle.cfg.left, right: battle.cfg.right })
+  battle.playerSide = new Map(info.players.map(p => [p.id, p.side]))
+  // 注册表按**运行时 petId** 建键 (glue.ts 的 petMeta 用同一个键), 不是种族 id ——
+  // snapshot 的 activePet 就是 petId, 用错键就永远查不到、读数条会静默退回官方表。
+  battle.cfgByPet = new Map([[String(info.players?.[0]?.team?.[0]?.petId), battle.cfg.left], [String(info.players?.[1]?.team?.[0]?.petId), battle.cfg.right]])
+  await syncUI()
+  await armTurn()
+  document.getElementById('hint').textContent = `内核就绪 · ${battle.cfg.left.name} vs ${battle.cfg.right.name} · 点击技能卡出手`
+}
+
+function onUIMessage(e) {
+  if (e.data?.type === 'skillSelect') takeTurn(e.data.index | 0)
+  if (e.data?.type === 'hubClick') hubClick(e.data.hub)
+}
+
+async function loadBattle() {
+  document.getElementById('hint').textContent = '载入中…'
+  const map = document.getElementById('mapSel').value
+  const bg = document.getElementById('bg')
+  bg.innerHTML = ''
+  const bp = window.RufflePlayer.newest().createPlayer()
+  bg.appendChild(bp)
+  await bp.ruffle().load({ url: `/swf/map/${map}.swf`, autoplay: 'on', unmuteOverlay: 'hidden', scale: 'noScale', menu: false, warnOnUnsupportedContent: false }).catch(() => {})
+  // ArenaScene.updateScene: ground.x = (root.width - ground.width) >> 1
+  // 地图SWF内容贴舞台左上,渲染后按实际内容宽度水平居中(一次性测量)
+  await new Promise(r => setTimeout(r, 1200))
+  try {
+    const cv = bp.shadowRoot.querySelector('canvas')
+    const off = new OffscreenCanvas(cv.width, cv.height)
+    const ctx = off.getContext('2d')
+    ctx.drawImage(cv, 0, 0)
+    const d = ctx.getImageData(0, 0, cv.width, cv.height).data
+    let x1 = 0
+    outer: for (let x = cv.width - 1; x >= 0; x--) for (let y = 0; y < cv.height; y += 4) { const i = (y * cv.width + x) * 4; if (d[i + 3] > 10 && d[i] + d[i + 1] + d[i + 2] > 60) { x1 = x + 1; break outer } }
+    if (x1 > 0 && x1 < cv.width) bg.style.transform = `translateX(${Math.round((cv.width - x1) / 2)}px)`
+  } catch (e) { console.warn('map center', e) }
+  const enemySwf = WILD ? WILD.petId : document.getElementById('id1').value
+  let leadSwf = document.getElementById('id0').value
+  if (WILD) {   // 我方容器画存档首发宠 (原版 Fighter 装载即队伍 active pet)
+    await loadData()
+    const S0 = SESSION.loadSession(localStorage, PETS, RULES)
+    wild.S = S0
+    if (S0.team.length) leadSwf = S0.team[0].swfId
+  }
+  await Promise.all([
+    makeFighter('fL', leadSwf, 120, false),
+    makeFighter('fR', enemySwf, ROOT_W - 120, true),
+    loadFightUI(),
+  ])
+  try {
+    if (WILD) await startWildBattle()
+    else await startKernelBattle()
+  } catch (e) { console.warn('kernel', e); document.getElementById('hint').textContent = '内核启动失败: ' + e }
+  const el = document.getElementById('states')
+  try { el.innerHTML = (await state.players.fL.getAvailableStates() || []).filter(s => s !== '空').map(s => `<button data-s="${s}">${s}</button>`).join(' ') } catch (e) {}
+  el.querySelectorAll('button').forEach(b => b.onclick = () => {
+    el.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b))
+    for (const id of ['fL', 'fR']) {
+      try { Promise.resolve(state.players[id]?.setState?.(b.dataset.s)).catch(() => {}) } catch (e) {}
+    }
+  })
+}
+
+// 默认 1 vs 2 = 迪兰 vs 迪迪兰: 迪兰的 10001 拍打 在重启表里命中 95 (官方表是 100),
+// 这条默认值就是「内容宇宙已换」的现场判据 (计划 S2 判据)。
+const BAR = `<label>地图 <select id="mapSel"></select></label>
+  <label>我方 <input type="number" id="id0" value="1"></label>
+  <label>敌方 <input type="number" id="id1" value="2"></label>
+  <button id="loadBtn">载入战斗</button>
+  <span id="states"></span>`
+// 图层 = 原版战斗舞台的四层 (地图 / 左右 fight 容器 / 战斗UI), 面板与结算浮层是 DOM 层
+const STAGE = `<div id="bg"></div>
+  <div class="fighter" id="fL"></div>
+  <div class="fighter" id="fR"></div>
+  <div id="ui"></div>
+  <div id="cards"></div>
+  <div id="panel"></div>
+  <div id="settle"></div>`
+
+export async function mount(query) {
+  P = query || new URLSearchParams()
+  // 从地图点野怪进来: #/battle?wild=精灵id&level=等级&slot=positionIndex&map=fightMap&back=地图id
+  // (原版 1500 协议只回传 positionIndex, 怪的种族/等级来自服务端 1103 的配置; 我方单机把这三样直接挂在地址上)
+  WILD = P.get('wild') ? { petId: P.get('wild') | 0, level: Math.min(100, Math.max(1, P.get('level') | 0)), slot: P.get('slot') | 0, back: P.get('back') || '' } : null
+  const MAPS = ['1', '100002', '1000000']
+  if (WILD && P.get('map')) MAPS.unshift(P.get('map'))
+  document.getElementById('ctrlButtons').innerHTML = BAR
+  document.getElementById('wrap').innerHTML = STAGE
+  panelEl = document.getElementById('panel')
+  settleEl = document.getElementById('settle')
+  const mapSel = document.getElementById('mapSel')
+  mapSel.innerHTML = MAPS.map(m => `<option>${m}</option>`).join('')
+  if (WILD) {
+    document.getElementById('id1').value = WILD.petId
+    mapSel.value = P.get('map') || '100002'
+    document.getElementById('hint').textContent = `野外遭遇 · 槽位${WILD.slot}`
+    const a = document.createElement('a')
+    a.href = '#/map' + (WILD.back ? '?map=' + WILD.back : '')
+    a.textContent = '↩ 返回地图'
+    a.style.cssText = 'color:#7fb2ff;font:13px system-ui;margin-left:8px'
+    document.getElementById('loadBtn').after(a)
+  }
+  // 单页不会重建 document, 上一局的战斗态必须显式作废 (原来靠整页刷新)
+  battle.K = null; battle.armed = false; battle.over = false; battle.settled = false
+  battle.states = { fL: [], fR: [] }; battle.playerSide = null; battle.cfg = {}; battle.lastSt = null; battle.cfgByPet = null
+  wild.on = false; wild.S = null; wild.deps = null
+  wild.uidByPet = new Map(); wild.petByUid = new Map(); wild.activeSwf = null
+  state.players = {}
+  document.getElementById('loadBtn').onclick = loadBattle
+  addEventListener('message', onUIMessage)
+  window.takeTurn = takeTurn   // 回归工具入口 (tools/verify-battle.mjs)
+  window.battleApp = { battle, wild, hubClick, doCapture, doPotion, doSwitch, doEscape, takeTurn, LOGIC, SESSION, SETTLE, PETS: () => PETS, RULES: () => RULES }
+  loadBattle()
+}
+
+export function unmount() {
+  removeEventListener('message', onUIMessage)
+  // 断掉还在 await 的回合链: 它们靠 armed/over 收敛 (日志已改走浏览器 console)
+  battle.armed = false; battle.over = true
+  document.getElementById('wrap').innerHTML = ''   // ruffle-player 脱离 DOM 即 destroy
+  state.players = {}
+}

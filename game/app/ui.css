@@ -1,0 +1,1280 @@
+/* 重启面板层 (UI 线 U0)。血统 = projects/Seer2-Restart-Lite-main 的 Unity UGUI 面板系统，
+   规划与判据见 docs/view/ui-handoff.md；宿主逻辑见 game/app/view/panels/host.js。
+
+   坐标口径（实测，不是猜的）：
+     CanvasScaler m_ReferenceResolution = 960x540，m_MatchWidthOrHeight = 0（按宽缩放）
+     —— Assets/Scenes/{Fight,Map,...}.unity 六场景一致（Fight.unity:18809-18814）。
+   所以本层内部一律用 960x540 逻辑像素，整体缩放 = 舞台宽 / 960，再按高度居中（Unity 画布居中于屏幕）。
+   面板不自己算数，一律读 game/core/** 的导出（docs/view/ui-handoff.md §6 的硬约束）。
+
+   指针：舞台要给下层（地图 / 战斗的 canvas 要点得动），所以 #rv 与 .rv-panel 都放行 pointer-events，
+   只有面板真正占地方的元素（遮罩 / 盒体 / 按钮）才收 —— Unity 侧同理，只有 RaycastTarget 的图形挡点击。 */
+
+#rv { position:absolute; inset:0; width:1200px; height:660px; z-index:60; pointer-events:none;
+      /* 重直线没有 SWF 字体子集那套坑，直接系统 CJK */
+      font-family:"Noto Sans CJK SC","Source Han Sans CN","WenQuanYi Micro Hei",system-ui,sans-serif; }
+#rv .rv-scale { position:absolute; left:0; top:0; transform-origin:0 0; }
+/* 高度默认 540（fixed 画布模式 = 地图 HUD 的既路口径）；战斗切到 match 模式时
+   host.js 把可变逻辑高写进 --rv-h ⇒ 顶带贴 y=0、底栏贴 y=refH 都不再被裁（docs/view/scene/battle/view-scene-battle-impl.md §3.2）。 */
+#rv .rv-panel { position:absolute; left:0; top:0; width:960px; height:var(--rv-h,540px); pointer-events:none; }
+/* 模态遮罩：垫在 .rv-panel 内、面板内容之下，挡住背后地图/场景的误触
+   （上游 Panel.prefab 黑 a=.5 遮罩的对应物，docs/view/mech/view-panel-stack.md §7#3）。
+   内容元素各自 pointer-events:auto 仍在遮罩之上可点；遮罩自身只收「面板外」的点击。 */
+#rv .rv-scrim { position:absolute; left:0; top:0; width:100%; height:100%;
+               pointer-events:auto; background:rgba(0,0,0,.5); }
+
+/* ---- 全局屏幕大小开关（编排线 · 屏幕线；人类 2026-10-19 拍板）---- 只由 body.screen-full 这一个 class 触发，
+   由 game/app/screen.js 统一驱动：所有场景（开始/登录/标题/房间/战斗）共用同一个游戏屏幕，
+   full 模式 = 整舞台（#wrap，恒 1200x660 逻辑）经 CSS transform: scale 等比缩放铺满窗口（contain），
+   缩放由 screen.js 直接写在 #wrap.style.transform 上，所以这里不再动 #wrap/#rv 的宽高（保持 1200x660）。
+   隐藏而非删除：selftest 与部分 harness 仍在读 #log 的 textContent。
+   #fab / #ctrlPanel 是 fixed、在 #wrap 之外，不受影响 ⇒ 全屏下仍能开控制面板切回。 */
+body.screen-full              { overflow:hidden; }
+body.screen-full h1,
+body.screen-full #rvbar,
+body.screen-full #bar,
+body.screen-full #log         { display:none; }
+
+/* ---- Hintbox ---- 上游：Panels/Hintbox/Panel.prefab + "Panel Without Background".prefab
+   结构（照 prefab 抄，括号里是 RectTransform 的实测值）：
+     Panel.prefab 根           全屏 Image，内置 UISprite 黑 a=.5（遮罩），sizeDelta 10,10 → 960+10 x 540+10；
+                               Panel.prefab 把它覆写进 Hintbox 的 background 字段，所以实例化的 Hintbox 带遮罩
+     Panel Without Background  320x240 居中，Image 内置 UISprite 黑 a=1 + Outline(白 3,-3)  ← 盒体
+       View                    全拉伸
+         Bottom Decorate       全拉伸，引 Hint Box Bottom Decorate.png（304x196 拉伸到 320x240）
+         Corner Decorate       贴底高 60，引 Hint Box Corner Decorate.png（305x59 → 320x60）
+         Position Adjust       全拉伸的纯过路节点（尺寸/偏移全 0），这里拍平不建节点
+           Title Text          anchor 上边，y=-15，pivot 顶，sizeDelta(-10,30)，20px，色 0/250/255
+           Content Text        sizeDelta(-20,-110) 居中 +y5 → 300x130，行距 1.3
+           Bottom Options      贴底 y=10，高 45
+             One Option / Two Options  全拉伸容器，拍平
+               Confirm / Cancel  80x30，Two Options 下 x=∓60（One Option 下 x=0）
+   已知偏差（记在 docs/view/ui-handoff.md §9）：盒体圆角用 border-radius 近似 Unity 内置 UISprite 的九宫格；
+   字体用系统 CJK 顶替上游的 Zongyi(综艺体)/Arial。 */
+
+.rb-scrim { position:absolute; left:0; top:0; width:1200px; height:660px; pointer-events:auto;
+            background:rgba(0,0,0,.5); }
+.rb-box { position:absolute; left:320px; top:150px; width:320px; height:240px; pointer-events:auto;
+          background:#000; border-radius:10px;
+          /* Outline 白 (3,-3)：Unity 的 Outline 会按 ±x / ±y 铺四份，所以是四向投影 */
+          box-shadow:3px -3px 0 #fff, -3px 3px 0 #fff, 3px 3px 0 #fff, -3px -3px 0 #fff; }
+.rb-view { position:absolute; left:0; top:0; width:100%; height:100%; overflow:hidden; }
+.rb-bottom-decorate { position:absolute; left:0; top:0; width:100%; height:100%;
+                      background-repeat:no-repeat; background-size:100% 100%; }
+.rb-corner-decorate { position:absolute; left:0; bottom:0; width:100%; height:60px;
+                      background-repeat:no-repeat; background-size:100% 100%; }
+
+.rb-title { position:absolute; left:5px; right:5px; top:15px; height:30px;
+            display:flex; align-items:center; justify-content:center;
+            color:#00faff; font-size:20px; line-height:1; }
+.rb-content { position:absolute; left:10px; right:10px; top:50px; height:130px;
+              display:flex; align-items:center; justify-content:center;
+              color:#00faff; line-height:1.3;
+              text-align:center; white-space:pre-wrap; overflow:hidden; }
+
+.rb-options { position:absolute; left:0; right:0; bottom:10px; height:45px; }
+/* 按钮 = 纯图（confirm.png / cancel.png 已把字烘进图里，prefab 里按钮无 Text 子对象）80x30。
+   三态精灵走 prefab 的 SpriteState：normal / hover(Highlighted) / click(Pressed)。 */
+.rb-btn { position:absolute; top:50%; margin-top:-15px; width:80px; height:30px; cursor:pointer;
+          border:0; padding:0; background-color:transparent;
+          background-repeat:no-repeat; background-size:100% 100%; background-image:var(--n); }
+.rb-btn:hover { background-image:var(--h); }
+.rb-btn:active { background-image:var(--p); }
+.rb-btn--single  { left:50%; margin-left:-40px; }   /* One Option：Confirm x=0 */
+.rb-btn--confirm { left:50%; margin-left:-100px; }  /* Two Options：Confirm x=-60 */
+.rb-btn--cancel  { left:50%; margin-left:20px; }    /* Two Options：Cancel  x=+60 */
+
+/* ---- 战斗 HUD（重启 IA 复刻）---- 血统：projects/Seer2-Restart-Lite-main Sprites/Fight/*.png。
+   几何权威 = docs/view/scene/battle/view-scene-battle-design.md §4，逐盒抄在各 view 的 GEO/BOX 表里由 JS 内联（anch()/fitBar()）；
+   **这里只留表现**：底色/字体/描边/状态类/指针穿透。施工图 = docs/view/scene/battle/view-scene-battle-impl.md §7。
+   数字只读 game/core/**（§6/D2），面板零算数。容器一律 pointer-events:none，可点件各自 auto。 */
+
+/* §2.6：两款命脉字体直引本地 TTF（同源静态服务，不发站外请求）。MSJH/Simsun 是 TTC 集合 ⇒ 不引，
+   名牌/战报继续系统 CJK（设计 §10 #5 的收口口径）。 */
+@font-face { font-family:"RbbNum"; src:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Fonts/Mini%20Diamond.TTF") format("truetype"); }
+@font-face { font-family:"RbbUi";  src:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Fonts/Zongyi.TTF")       format("truetype"); }
+#rv .rbb-num  { font-family:"RbbNum","DejaVu Sans Mono",monospace; }   /* 供 harness/调试点名 */
+
+#rv .rbb-topband { pointer-events:none; }
+
+/* ── R1 血牌（.rbb-plate 我=左 0..400、敌=右 560..960；敌牌只镜像底图，文字与头像不翻，否则数字反写）── */
+#rv .rbb-plate     { pointer-events:none; }
+#rv .rbb-plate-bg  { background-size:100% 100%; background-repeat:no-repeat; }
+#rv .rbb-plate--op .rbb-plate-bg { transform:scaleX(-1); }
+#rv .rbb-portrait    { overflow:hidden; background:#0b0f16; }
+#rv .rbb-portrait img { display:block; width:100%; height:100%; object-fit:contain; }
+#rv .rbb-portrait-fb { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:#fff; font-size:30px; }
+#rv .rbb-numlabel, #rv .rbb-lvlabel { background-size:100% 100%; background-repeat:no-repeat; }
+
+/* 条 = 一层（§2.4）：底槽形烘在 Player hp bar.png 里 ⇒ 轨道透明，fill 只是一条**染色矩形 + mask 定形**。
+   起点方向：我方左对齐、敌方右对齐（截图坐实敌怒 20/100 的红段贴右）。 */
+#rv .rbb-hp, #rv .rbb-anger { background:transparent; }
+#rv .rbb-hp-fill, #rv .rbb-anger-fill { position:absolute; left:0; top:0; height:100%; }
+#rv .rbb-plate--op .rbb-hp-fill, #rv .rbb-plate--op .rbb-anger-fill { left:auto; right:0; }
+
+/* 数字压条内：上游是两个 Text + 一个从不被代码写的静态 '/' ⇒ DOM 侧照抄三段（cur 右、sep 居中、max 左）。 */
+#rv .rbb-hp-txt, #rv .rbb-anger-txt { position:absolute; inset:0; display:grid; grid-template-columns:1fr auto 1fr;
+  align-items:center; pointer-events:none; color:#fff; font-family:"RbbNum","DejaVu Sans Mono",monospace;
+  text-shadow:0 1px 0 #000, 0 0 3px #000; }
+#rv .rbb-hp-txt    { font-size:14px; }
+#rv .rbb-anger-txt { font-size:12px; }
+#rv .rbb-hp-cur, #rv .rbb-anger-cur   { text-align:right; }
+#rv .rbb-hp-sep, #rv .rbb-anger-sep   { text-align:center; padding:0 2px; }
+#rv .rbb-hp-max, #rv .rbb-anger-max   { text-align:left; }
+
+#rv .rbb-lvnum { position:absolute; font-family:"RbbUi","Noto Sans CJK SC",sans-serif; font-size:16px; color:#fff; text-shadow:0 1px 0 #000; }
+#rv .rbb-elem-img { width:100%; height:100%; background-size:100% 100%; background-repeat:no-repeat; }
+#rv .rbb-name { position:absolute; color:#52e5f9; font-size:12px; line-height:20px; text-align:center; overflow:hidden; white-space:nowrap;
+                text-shadow:0 1px 2px #000; font-family:"RbbUi","Noto Sans CJK SC",sans-serif; }
+#rv .rbb-name[data-fit="10"] { font-size:10px; }          /* BattlePetInfoView.nameFontSizeFit */
+#rv .rbb-plate--op .rbb-name { text-align:right; }
+
+/* 六珠：14×19、pitch 13（图与图压 1px）；has-dead = 上游 Color.gray。 */
+#rv .rbb-petnum { display:flex; align-items:flex-start; }
+#rv .rbb-bead { flex:0 0 auto; width:14px; height:19px; margin-right:-1px; background-size:100% 100%; background-repeat:no-repeat; }
+#rv .rbb-bead[data-state="has-dead"] { filter:grayscale(1) brightness(.75); }
+
+/* buff 网格：格 32×32、底 85.png（HelperUI.cs:200 的缺省图标位），图标另叠 <img>；value==0 不建数字节点。 */
+#rv .rbb-buffs, #rv .rbb-statebuffs { pointer-events:none; }
+#rv .rbb-buff { position:absolute; width:32px; height:32px; pointer-events:auto; }
+#rv .rbb-buff-icon { position:absolute; inset:0;
+  background:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Panels/OldPetBag/Sprites/85.png") 0 0/100% 100% no-repeat; }
+#rv .rbb-buff-img { width:100%; height:100%; object-fit:contain; }
+#rv .rbb-buff-val { position:absolute; right:1px; bottom:0; font-size:11px; color:#fff; text-shadow:0 1px 1px #000;
+  font-family:"RbbNum","DejaVu Sans Mono",monospace; }
+
+/* ── R2 回合板（上游 Weather 节点：内置白图染黑 + Outline，文本 #52E5F9 16 Bold 居中、行距 1.1）── */
+#rv .rbb-round { position:absolute; background:#000; border-radius:6px; box-shadow:0 0 0 2px rgba(255,255,255,.85);
+                 display:flex; align-items:center; justify-content:center; pointer-events:none; }
+#rv .rbb-round-txt { color:#52e5f9; font-family:"RbbUi","Noto Sans CJK SC",sans-serif; font-size:16px; font-weight:700;
+                     line-height:1.1; text-align:center; white-space:pre-line; }
+
+/* ── R4 底栏（Bottom bar.png 960×115 原尺寸；只有页签/必杀/自动/绿圆钮收点击）── */
+#rv .rbb-bottombar { background-size:960px 115px; background-repeat:no-repeat; pointer-events:none; }
+#rv .rbb-superskill { position:absolute; background:#000; border-radius:6px; overflow:hidden; pointer-events:auto; cursor:pointer; }
+#rv .rbb-super-layer { position:absolute; left:8px; top:14px; width:53px; height:77px;
+                       background-size:100% 100%; background-repeat:no-repeat; opacity:.55; }
+#rv .rbb-super-layer--shine { opacity:1; filter:drop-shadow(0 0 6px #52e5f9); animation:rbb-super-pulse 1.2s ease-in-out infinite; }
+@keyframes rbb-super-pulse { 0%,100% { opacity:.75 } 50% { opacity:1 } }   /* 上游是 ParticleAfterburner.mat ⇒ CSS 近似（§14） */
+
+#rv .rbb-content, #rv .rbb-options { position:absolute; pointer-events:none; }
+#rv .rbb-page { position:absolute; inset:0; }
+#rv .rbb-option { position:absolute; pointer-events:auto; cursor:pointer; }
+#rv .rbb-option-art { position:absolute; inset:0; background-size:100% 100%; background-repeat:no-repeat; }
+#rv .rbb-option-outline { position:absolute; inset:-1px;   /* 场景里 outline 的 sizeDelta 是 182×105，比字标盒每边大 1px */
+  background:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Sprites/Fight/battle%20outline.png") 0 0/100% 100% no-repeat; }
+/* split line：场景 SizeDelta (110,4) + m_LocalRotation z=.7071 ⇒ 竖着的一道 4×110（真图 67×2 拉成 110×4 再转 90°）。
+   设计 §4.4 那行写的「110×4」是 SizeDelta 原值，不是磁盘尺寸（磁盘 67×2，§5 表已按真图记）。 */
+#rv .rbb-option-split { position:absolute; left:50%; top:50%; width:110px; height:4px;
+  transform:translate(-50%, -50%) rotate(90deg); transform-origin:center;
+  background:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Sprites/Fight/battle%20split%20line.png") 0 0/100% 100% no-repeat; }
+#rv .rbb-option--off { opacity:.45; cursor:default; }
+
+#rv .rbb-auto { position:absolute; box-sizing:border-box; background:#000; border-radius:15px;
+  box-shadow:0 0 0 2px #ffcc33; display:flex; align-items:center; padding:0 6px; pointer-events:auto; cursor:pointer; }
+#rv .rbb-auto-check { position:relative; flex:0 0 auto; width:25px; height:19px;
+  background:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Panels/Mailbox/Sprites/check.png") 0 0/100% 100% no-repeat; }
+#rv .rbb-auto-check::after { content:''; position:absolute; left:6px; top:6px; width:10px; height:5px;
+  border-left:2px solid #78ff5a; border-bottom:2px solid #78ff5a; transform:rotate(-45deg); opacity:0; }
+#rv .rbb-auto-check--on::after { opacity:1; }
+#rv .rbb-auto-label { font-family:"RbbUi","Noto Sans CJK SC",sans-serif; font-size:16px; color:#ffcc33; margin-left:6px; white-space:nowrap; }
+
+#rv .rbb-noop { background-size:100% 100%; background-repeat:no-repeat; pointer-events:auto; cursor:pointer; }
+#rv .rbb-noop--off { filter:grayscale(.7); opacity:.5; cursor:default; }   /* disabled = 「没有可用技能」，上游反向逻辑 */
+
+/* ── R6 技能卡（4 固定槽，空槽不建节点；卡 155×82 = Skill normal.png 原尺寸）── */
+#rv .rbb-skills { position:absolute; inset:0; pointer-events:none; }
+#rv .rbb-skill { position:absolute; box-sizing:border-box; background-size:100% 100%; background-repeat:no-repeat;
+  padding:6px 8px 6px 40px; pointer-events:auto; cursor:pointer; color:#fff; text-shadow:0 1px 2px #000; }
+#rv .rbb-skill-elem { position:absolute; left:6px; top:22px; width:26px; height:26px;
+  background-size:100% 100%; background-repeat:no-repeat; }
+#rv .rbb-skill-name { font-family:"RbbUi","Noto Sans CJK SC",sans-serif; line-height:1.2; white-space:nowrap; overflow:hidden; }
+#rv .rbb-skill-power, #rv .rbb-skill-cat, #rv .rbb-skill-cost { font-size:11px; color:#cfe0ff; }
+#rv .rbb-skill-cost { color:#ffe066; }
+#rv .rbb-skill--off { filter:grayscale(.6); opacity:.6; cursor:not-allowed; }
+#rv .rbb-skill[data-passive] { cursor:default; }
+
+/* ── R5 战斗记录（默认收起 = display:none，截图那一格是空的 ⇒ 不画）── */
+#rv .rbb-record { background:rgba(0,0,0,.55); border-radius:6px; box-shadow:0 0 0 1px rgba(255,255,255,.35);
+  pointer-events:auto; overflow:hidden; }
+#rv .rbb-record-body { position:absolute; inset:6px 10px; overflow-y:auto; color:#fff; font-size:12px; line-height:1.35;
+  font-family:"Noto Sans CJK SC",sans-serif; }
+#rv .rbb-record .rbb-line { white-space:pre-wrap; }
+#rv .rbb-extend { position:absolute; background-size:100% 100%; background-repeat:no-repeat; pointer-events:auto; cursor:pointer; }
+
+/* ── 换宠页（6 槽；Pet change option.png 88×93 原尺寸，在场宠叠 current fight.png 火焰角标）── */
+#rv .rbb-change { position:absolute; inset:0; }
+#rv .rbb-change-btn { position:absolute; box-sizing:border-box; background-size:100% 100%; background-repeat:no-repeat;
+  pointer-events:auto; cursor:pointer; }
+#rv .rbb-change-btn--off { cursor:default; }
+#rv .rbb-change-btn--off .rbb-change-face { filter:grayscale(1) brightness(.7); }
+#rv .rbb-change-face { position:absolute; left:9px; top:8px; width:70px; height:56px; overflow:hidden;
+  background-size:contain; background-repeat:no-repeat; background-position:center;
+  display:flex; align-items:center; justify-content:center; color:#fff; font-size:24px; }
+#rv .rbb-change-hp { position:absolute; left:0; right:0; bottom:4px; text-align:center; font-size:12px; color:#fff;
+  text-shadow:0 1px 2px #000; font-family:"RbbNum","DejaVu Sans Mono",monospace; }
+#rv .rbb-change-current { background:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Sprites/Fight/current%20fight.png") 0 0/100% 100% no-repeat; }
+
+/* ── 捕捉/道具页（8 格 62×62，底 OldPetBag/87.png）── */
+#rv .rbb-items { position:absolute; inset:0; }
+#rv .rbb-item { position:absolute; box-sizing:border-box; background-size:100% 100%; background-repeat:no-repeat;
+  pointer-events:auto; cursor:pointer; }
+#rv .rbb-item--off { opacity:.45; cursor:default; }
+#rv .rbb-item-name { position:absolute; left:2px; right:2px; top:6px; text-align:center; font-size:11px; color:#eaf0ff;
+  text-shadow:0 1px 2px #000; overflow:hidden; white-space:nowrap; font-family:"Noto Sans CJK SC",sans-serif; }
+#rv .rbb-item-count { position:absolute; left:2px; right:2px; bottom:6px; text-align:center; font-size:12px; color:#ffe066;
+  text-shadow:0 1px 2px #000; font-family:"RbbNum","DejaVu Sans Mono",monospace; }
+#rv .rbb-items-empty { position:absolute; left:0; right:0; top:40px; text-align:center; font-size:13px; color:#9fb0cc;
+  font-family:"Noto Sans CJK SC",sans-serif; }
+
+/* 条的通用填充件（地图/背包线仍在用；战斗线本轮改走 .rbb-*-fill，不再产出这个类）。 */
+#rv .rbb-bar-fill { position:absolute; left:0; top:0; height:100%; background-repeat:no-repeat; background-position:left center; }
+
+#rv .rbb-result { position:absolute; left:0; top:0; width:960px; height:540px; background-size:contain; background-position:center;
+                  background-repeat:no-repeat; display:flex; align-items:center; justify-content:center; pointer-events:auto; }
+#rv .rbb-result-label { font-size:40px; color:#fff; text-shadow:0 2px 8px #000; }
+
+#rv .rbb-notice { position:absolute; left:50%; bottom:132px; transform:translateX(-50%); max-width:640px;
+                  background:rgba(20,24,34,.92); color:#ffd76a; font-size:13px; padding:8px 14px; border-radius:8px;
+                  border:1px solid #4a5266; pointer-events:none; opacity:0; transition:opacity .3s; }
+
+/* ---- U2 捕捉/换宠的模态弹层 CSS 已退役：新版式把它改成底栏页签页（.rbb-change / .rbb-items，§7）。 ----
+
+/* ---- U3 重启原生主场景常驻 HUD (顶替 maprunner/HudRunner.as 的 SWF HUD) ----
+   几何权威 = Assets/Scenes/Map.unity 的 RectTransform (逐节点量出, 抄进 restartHudView 的 GEO/SPR/MENU 三表);
+   语义权威 = 同场景的 onPointerClick / SetInfoPromptText 埋点; 施工图 = docs/view/scene/room/view-scene-hud-impl.md。
+   位置/尺寸由 JS 内联 (与场景一一对应), 这里只留颜色/边框/字体等表现。
+   中心透明放行点击到地图; 数字全读 A/content (面板零算数); 青边圆角盒是 CSS 近似 ——
+   上游黑底用内建白图 9 切片染色, 仓库里没有圆角边框 PNG (D2 许可)。 */
+#rv .rbh-root { position:absolute; left:0; top:0; width:960px; height:540px; pointer-events:none; }
+
+/* 黑底青边盒 = 上游 Background 节点 (内建白图 m_Color=#000000) + 截图上的青色圆角描边。
+   描边用 inset box-shadow 而不是 border: border 会把绝对定位子节点整体挤偏 2px (border-box 的
+   内容原点从边框内侧起算), 而 Unity 的 9 切片边框本来就画在 RectTransform 矩形**内侧** ⇒ 一致。 */
+#rv .rbh-card, #rv .rbh-rail-cell, #rv .rbh-daynight, #rv .rbh-weather,
+#rv .rbh-corner, #rv .rbh-bar, #rv .rbh-gear, #rv .rbh-minimap {
+  box-sizing:border-box; background:#000; border-radius:8px; box-shadow:inset 0 0 0 2px #3fd0e0; }
+#rv .rbh-card, #rv .rbh-rail-cell, #rv .rbh-daynight, #rv .rbh-weather,
+#rv .rbh-corner, #rv .rbh-gear, #rv .rbh-minimap, #rv .rbh-menu-btn { pointer-events:auto; cursor:pointer; }
+#rv .rbh-menu-btn:hover, #rv .rbh-card:hover, #rv .rbh-gear:hover, #rv .rbh-corner:hover,
+#rv .rbh-daynight:hover, #rv .rbh-weather:hover, #rv .rbh-rail-cell:hover { filter:brightness(1.18); }
+
+/* R1 队首卡 (PetCorner 150×70@0,2 + PetSelectBlock 预制体 0.6 缩放) */
+#rv .rbh-portrait { position:absolute; overflow:hidden; background:#0b0f16; padding:3px; box-sizing:border-box; }
+#rv .rbh-portrait img { width:100%; height:100%; display:block; object-fit:contain; }
+#rv .rbh-portrait-fb { width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+                       color:#0b0f16; font-weight:700; font-size:18px; border-radius:4px; }
+#rv .rbh-portrait--lead { border-radius:6px; background:no-repeat center / 100% 100%;
+                          background-image:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Panels/OldPetBag/Sprites/87.png"); }
+#rv .rbh-lead-name { position:absolute; margin:0; color:#41ffff; font-size:13px; line-height:18px; text-align:center;
+                     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#rv .rbh-hp { position:absolute; overflow:hidden; background:#0a0d14; box-shadow:inset 0 0 0 1px #2b3242; border-radius:2px; }
+/* 上游 Map.unity Hp Bar: m_Sprite=0 (内建白图) + m_Color=#77E20C ⇒ 主场景是纯绿条,
+   不是旧战斗线那张按宽度切片会变色的渐变图（docs/view/scene/room/view-scene-hud-design.md:10 那句「战斗线渐变」是误记，本轮已改）。 */
+#rv .rbh-hp .rbb-bar-fill { background:#77e20c; border-radius:2px; }
+#rv .rbh-hptxt { position:absolute; margin:0; text-align:center;
+                 font-size:8px; line-height:9px; color:#fff; text-shadow:0 1px 1px #000, 0 0 2px #000; pointer-events:none; }
+
+/* R2 队伍栏 (截图量测: 5 格 60×50@left 6.5, 顶 97.5 起, 间距 69.5)。
+   上游 Left Bar 是上下拉伸 + VerticalLayoutGroup paddingTop 20 ⇒ 格贴可见顶, 所以容器从设计 y=6 起。 */
+#rv .rbh-rail { position:absolute; left:0; top:6px; width:70px; height:528px; pointer-events:none; }
+#rv .rbh-rail-cell .rbh-portrait { left:2px; top:2px; right:2px; bottom:2px; width:auto; height:auto; border-radius:5px; }
+
+/* R3 地图名两侧小钮 (左 Day Night=切换地图, 右 Weather=天气) */
+#rv .rbh-daynight-icon, #rv .rbh-weather-icon { pointer-events:none; }
+
+/* R4 地图名横幅 (Map Name Background 160×40@400,-5) */
+#rv .rbh-title { pointer-events:none; }
+#rv .rbh-title-art { pointer-events:none; }
+#rv .rbh-maptitle { position:absolute; left:0; top:5px; width:160px; height:30px; margin:0; text-align:center;
+                    color:#fff; font-weight:700; font-size:16px; line-height:30px; text-shadow:0 1px 3px #000; }
+
+/* R5 地图角标 (Map Corner 70×70@5,470) —— 大地图/小地图钮各自可点, 罗盘只是装饰 */
+#rv .rbh-globe, #rv .rbh-minimap { pointer-events:auto; cursor:pointer; }
+#rv .rbh-compass { pointer-events:none; }
+#rv .rbh-minimap { border-radius:6px; }
+
+/* R6+R7 底栏两带 13 钮 (Challenge Bar 440×45@85,495 / Menu Area 360×45@530,495) */
+#rv .rbh-bar { pointer-events:none; }
+#rv .rbh-menu-icon, #rv .rbh-menu-new { pointer-events:none; }
+/* G 族中文标签 = 场景 Menu Area 里每个图标下的 Text (Legacy): 盒 30×30, m_Alignment=8 (LowerRight),
+   m_FontSize=13, FontStyle=0。盒盒心对齐 ⇒ 六个标签落在同一条基线上 (绝对 y 502.5..532.5),
+   字贴着各自图标的右下角。人类 2026-10-19 拍板: 字号 13→ 加粗一档 (700) 并保留描边阴影,
+   让小字在 960×540 缩放下更易读 (上游 FontStyle=0 是常规, 这是我们自己的可读性取舍)。 */
+#rv .rbh-menu-label { position:absolute; margin:0; white-space:nowrap;
+                      width:30px; height:30px; box-sizing:border-box;
+                      display:flex; align-items:flex-end; justify-content:flex-end;
+                      font-size:13px; line-height:1; font-weight:700;
+                      color:#52e5f9; text-shadow:0 1px 2px #000, 0 0 2px #000; pointer-events:none; }
+#rv .rbh-menu-btn[data-mid="dict"] .rbh-menu-label { color:#ffcc33; }
+
+/* R8 设定 (Settings Area 60×60@895,480, 齿轮 + 下方「设 定」) */
+#rv .rbh-gear-icon, #rv .rbh-gear-label { pointer-events:none; }
+#rv .rbh-gear-label { position:absolute; left:0; top:42px; width:60px; height:15px; margin:0; text-align:center;
+                      font-size:12px; line-height:15px; color:#52e5f9; text-shadow:0 1px 2px #000; }
+
+/* R9 收起/唤出 HUD 的箭头 (人类 2026-10-19 要求) —— 钉在「精灵背包」卡右缘外侧 (盒 [154,25,24,24] + EDGE)。
+   上游 Map.unity 里没有这一钮 ⇒ 它是我们的额外入口, 但素材用原版 Map/arrow.png (24×24 青三角), 方向靠旋转:
+   指左 = 点一下把整块 HUD 收走 (截图/看画面用), 指右 = 点一下唤回。收起时**只有这颗箭头留着** (否则没法再点开)。 */
+#rv .rbh-toggle { pointer-events:auto; cursor:pointer; }
+#rv .rbh-toggle:hover { filter:brightness(1.18); }
+#rv .rbh-toggle-icon { pointer-events:none; transform:rotate(-90deg); transition:transform .12s ease-out; }
+#rv .rbh-root--hidden .rbh-toggle-icon { transform:rotate(90deg); }
+#rv .rbh-root--hidden > :not(.rbh-toggle) { display:none; }
+
+/* ---- 重启原生 精灵背包/仓库面板 (C1 impl · docs/view/panel/petbag-impl.md §4/§5)。
+   成色=准终局件: 数据源由装配层 stub 从 v3 现算成 petBag[12]/petStorage (repository.js 未落地, Save §6 无迁移)。
+   前缀: rbp- 背包外壳(rbp-item-* 精灵道具面板) · rbg- 网格构件(背包/仓库共用) · rbs- 仓库 · rbp-pers-* 性格层。
+   三层 IA (VP4 · 正本 = docs/view/panel/petbag/petbag-panel-desc.md):
+     ① 标题层 .rbp-head  ·  ② 内容层 .rbp-main(左 .rbp-display 显示区 ｜ 右 .rbp-info 信息区)  ·  ③ 队伍区 .rbp-team。
+   位置=我们的决定, 尺寸量级承 prefab (Pet Demo 300×340 / Pet Detail 603×325 / Button Group 85×340 / Storage 948×124)。 ---- */
+#rv .rbp-box { position:absolute; left:6px; top:8px; width:948px; height:524px; pointer-events:auto;
+  background:#0d1420; border:2px solid #3a4a6a; border-radius:10px; color:#e6ecf6; box-shadow:0 8px 30px rgba(0,0,0,.6);
+  display:grid; grid-template-columns:1fr; grid-template-rows:32px 1fr 122px 18px; gap:6px; padding:8px; box-sizing:border-box; }
+/* 高度吃满 960×540 画布（8px 上下留边, 与 fixed 模式 7.5px 居中裁切互不打架）；
+   ② 内容层 = 508−32−122−18−3×6 = 318px，容得下 ②.②.① 操作列 8 钮（~271px）。 */
+/* ① 标题层: 标题居中, ❌ 靠右 (左侧留给货币读数撑平衡) */
+#rv .rbp-head { grid-row:1; display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:8px; }
+#rv .rbp-title { font-weight:700; color:#ffe066; font-size:15px; text-align:center; }
+#rv .rbp-money { color:#9fd0ff; font-size:12px; justify-self:start; }
+#rv .rbp-close { cursor:pointer; color:#fff; padding:2px 8px; background:#5a2a2a; border-radius:5px; justify-self:end; }
+/* ② 内容层: 左显示区 ｜ 右信息区(操作列 + 信息面板) */
+#rv .rbp-main { grid-row:2; display:flex; gap:8px; min-height:0; isolation:isolate; }   /* isolate：让左右两列的 z-index 只在本行内生效，不逃出盖住后开的模态（人格盘/hintbox） */
+/* ⚠️ 不设 overflow:hidden：HUD 悬停气泡允许越出显示区边界（观感更好）；idle 动画台自带 overflow:hidden，内容仍被裁在框内 */
+#rv .rbp-display { flex:0 0 300px; position:relative; z-index:2; border:1px solid #1c2740; border-radius:8px; background:rgba(0,0,0,.15); }
+#rv .rbp-info { flex:1 1 auto; display:flex; gap:8px; min-width:0; position:relative; z-index:1; }   /* 低于 .rbp-display(z:2)：形象/动画溢出时不挡在信息区之下 */
+#rv .rbp-acts { flex:0 0 84px; display:flex; flex-direction:column; gap:3px; min-height:0; }
+#rv .rbp-acts > * { flex:1 1 0; min-height:0; }
+#rv .rbp-ipanel { flex:1 1 auto; min-width:0; min-height:0; border:1px solid #1c2740; border-radius:8px; padding:6px 8px; overflow:hidden auto; }
+#rv .rbp-tabbody { min-height:0; }
+/* ③ 队伍区: 左箭头 + 6 只 + 右箭头 + 刷新 */
+#rv .rbp-team { grid-row:3; display:flex; align-items:center; gap:6px; border:1px solid #1c2740; border-radius:8px; padding:4px 6px; }
+#rv .rbp-team-refresh { cursor:pointer; padding:6px 10px; background:#243049; border:1px solid #3a4a6a; border-radius:5px; color:#eaf2ff; font-size:12px; flex:0 0 auto; }
+#rv .rbp-team-refresh:hover { background:#2f3f5f; }
+#rv .rbp-note { grid-row:4; color:#ffd76a; font-size:12px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+
+/* 网格构件 (rbg-*): 队伍区/仓库 一行 6 格 (空格照画 G8) + 左右箭头
+   一格版式（人类实测 desc 1.3 · 2026-10-17 补充）= **头像构成背景图**(.rbg-bg 铺满) + **底部信息条**(.rbg-strip: 等级 + 血条) */
+#rv .rbg-cells { flex:1 1 auto; display:flex; flex-wrap:nowrap; gap:6px; overflow:hidden; }
+#rv .rbg-cell { position:relative; flex:1 1 0; min-width:0; height:106px; padding:0; border:2px solid #55607a; border-radius:8px;
+  background:rgba(0,0,0,.35); cursor:pointer; box-sizing:border-box; overflow:hidden; }
+#rv .rbg-cell--on { outline:2px solid #ffe066; }
+#rv .rbg-cell--empty { border-style:dashed; opacity:.5; cursor:default; }
+#rv .rbg-bg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
+#rv .rbg-frame { position:relative; width:100%; height:100%; }
+#rv .rbg-mask { position:absolute; inset:0; overflow:hidden; }
+#rv .rbg-icon { width:100%; height:100%; }
+#rv .rbg-icon img { width:100%; height:100%; object-fit:contain; -webkit-user-drag:none; }
+#rv .rbg-elem { position:absolute; top:4px; left:5px; width:11px; height:11px; border-radius:50%; box-shadow:0 0 0 1px #0008; }
+#rv .rbg-strip { position:absolute; left:0; right:0; bottom:0; height:17px; box-sizing:border-box;
+  display:flex; align-items:center; gap:4px; padding:0 5px;
+  background:linear-gradient(rgba(6,10,18,0), rgba(6,10,18,.88) 45%); }
+#rv .rbg-lv { flex:0 0 auto; font-size:10px; color:#ffe066; text-shadow:0 1px 2px #000; }
+#rv .rbg-hptxt { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; color:#fff; text-shadow:0 1px 2px #000; pointer-events:none; white-space:nowrap; }
+#rv .rbg-mark { position:absolute; top:2px; right:4px; font-size:10px; color:#7fffd4; text-shadow:0 1px 2px #000; }
+#rv .rbg-hp { position:relative; flex:1 1 auto; min-width:42px; height:7px; background:#0a0d14; box-shadow:inset 0 0 0 1px #2b3242; border-radius:3px; }
+#rv .rbg-hp .rbb-bar-fill { background:#77e20c; border-radius:3px; }   /* 上游是内建白图染绿, 不是渐变切片 */
+#rv .rbg-pagebtn { flex:0 0 auto; cursor:pointer; padding:6px 8px; background:#243049; border:1px solid #3a4a6a; border-radius:4px; color:#eaf2ff; }
+#rv .rbg-pagebtn--off { opacity:.35; cursor:default; }
+#rv .rbg-pageno { flex:0 0 auto; color:#9fd0ff; font-size:11px; }
+
+/* 显示区: 默认精灵面板 (idle 动画台 + HUD) / 加成面板 */
+#rv .rbp-disp-empty { color:#8b93a7; font-size:12px; margin:auto; }
+#rv .rbp-demo { position:absolute; inset:0; display:flex; flex-direction:column; pointer-events:none; }
+#rv .rbp-stage { position:absolute; inset:0; border:1px dashed #2b3242; border-radius:6px; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.25); overflow:hidden; pointer-events:none; }   /* noScale 下容器(1200×660)原生渲染、溢出播放器 ⇒ 由此裁进 300×318 视窗；待机优先（攻击溢出后续再议） */
+#rv .rbp-stage img { max-width:70%; max-height:96%; object-fit:contain; -webkit-user-drag:none; }
+/* 无 swf 时的静态形象：照 Unity PetDemoView —— battleImage 固定 960×540、锚点居中偏移 (280,-40)[Unity y-up⇒web +280,+40]、PreserveAspect=0 拉伸填满；不裁 overflow ⇒ 大体型精灵溢出显示区也可见 */
+#rv .rbp-stage img.rbp-demo-img { position:absolute; width:960px; height:540px; max-width:none; max-height:none; left:calc(50% - 200px); top:calc(50% - 230px); object-fit:fill; }
+#rv .rbp-stage ruffle-player { width:100%; height:100%; display:block; }   /* idle 动画台 = 真 Flash 播放器 */
+#rv .rbp-stage-note { position:absolute; left:6px; bottom:4px; font-size:10px; color:#8b93a7; }
+#rv .rbp-hud { position:absolute; inset:0; pointer-events:none; }
+/* 名称 顶中 · 特性名 右上（文字） */
+#rv .rbp-name { position:absolute; top:4px; left:50%; transform:translateX(-50%); font-size:14px; font-weight:700; color:#ffe066; text-shadow:0 1px 3px #000; background:rgba(8,12,20,.5); border-radius:6px; padding:2px 12px; white-space:nowrap; }
+#rv .rbp-trait { position:absolute; top:4px; right:4px; max-width:130px; font-size:12px; color:#eaf2ff; background:rgba(8,12,20,.5); border-radius:6px; padding:2px 8px; text-align:right; pointer-events:auto; cursor:default; }
+#rv .rbp-trait-t { text-shadow:0 1px 2px #000; }
+/* 图标：属性/性别/纹章/个体值（默认只显图标，悬停出文字气泡） + 方位修饰类 */
+#rv .rbp-ic { position:absolute; pointer-events:auto; cursor:default; width:24px; height:24px; border-radius:5px; background:#1b2740; border:1px solid #3a4a6a; display:flex; align-items:center; justify-content:center; }
+#rv .rbp-ic-img { width:20px; height:20px; object-fit:contain; }
+#rv .rbp-ic-glyph { font-size:13px; font-weight:700; color:#eaf2ff; line-height:1; }
+#rv .rbp-ic--off { opacity:.4; }
+/* 纹章徽章显全名（双字）⇒ 放宽、缩字号 */
+#rv .rbp-ic--emblem { width:auto; min-width:24px; padding:0 5px; }
+#rv .rbp-ic--emblem .rbp-ic-glyph { font-size:11px; }
+#rv .rbp-pos-tl { top:4px; left:4px; }
+#rv .rbp-pos-tl2 { top:32px; left:4px; }
+#rv .rbp-pos-tr2 { top:32px; right:4px; }
+#rv .rbp-pos-br { bottom:4px; right:4px; }
+/* 悬停气泡：默认左对齐向右展开（左侧项）；.rbp-tipR 右对齐向左展开（右侧项，防溢出 300px 显示区） */
+#rv .rbp-ic-tip { position:absolute; top:calc(100% + 4px); left:0; display:none; flex-direction:column; gap:2px; background:#0d1420; border:1px solid #3a4a6a; border-radius:5px; padding:4px 8px; width:max-content; white-space:normal; max-width:300px; pointer-events:none; box-shadow:0 4px 10px #000a; z-index:5; }
+#rv .rbp-tipR .rbp-ic-tip { left:auto; right:0; }
+#rv .rbp-ic--tip-up .rbp-ic-tip { top:auto; bottom:calc(100% + 4px); }
+#rv .rbp-ic:hover .rbp-ic-tip, #rv .rbp-trait:hover .rbp-ic-tip { display:flex; }
+#rv .rbp-ic-tip-head { display:flex; gap:4px; align-items:baseline; }
+#rv .rbp-ic-tip-k { color:#8b93a7; font-size:10px; }
+#rv .rbp-ic-tip-v { color:#ffe066; font-size:12px; }
+#rv .rbp-ic-tip-d { color:#cfe0ff; font-size:11px; line-height:1.4; }
+/* 特性 / 纹章气泡调窄（更美观）：描述在此宽度折行 */
+#rv .rbp-trait .rbp-ic-tip, #rv .rbp-ic--emblem .rbp-ic-tip { max-width:180px; }
+#rv .rbp-hud-acts { position:absolute; bottom:6px; left:0; right:0; display:flex; gap:6px; justify-content:center; pointer-events:none; }
+#rv .rbp-hud-btn { cursor:pointer; pointer-events:auto; padding:3px 10px; background:#243049; border:1px solid #3a4a6a; border-radius:5px; color:#eaf2ff; font-size:11px; }
+#rv .rbp-hud-btn:hover { background:#2f3f5f; }
+#rv .rbp-buff { position:absolute; inset:0; display:flex; flex-direction:column; gap:8px; min-height:0; padding:8px; background:rgba(8,12,20,.6); pointer-events:auto; }
+#rv .rbp-buff-sec { flex:1 1 auto; min-height:0; border:1px solid #1c2740; border-radius:6px; padding:6px; overflow-y:auto; }
+#rv .rbp-buff-title { color:#9fd0ff; font-size:12px; border-bottom:1px solid #1c2740; padding-bottom:2px; }
+#rv .rbp-buff-list { display:flex; flex-direction:column; gap:2px; margin-top:4px; }
+#rv .rbp-buff-item { font-size:11px; color:#cfe0ff; padding:2px 4px; background:rgba(255,255,255,.03); border-radius:4px; }
+#rv .rbp-buff-empty { font-size:11px; color:#8b93a7; }
+
+/* 信息面板: 页签 基础/技能/抗性 + 子面板 */
+#rv .rbp-tabs { display:flex; gap:4px; margin-bottom:4px; }
+#rv .rbp-tab { cursor:pointer; padding:3px 10px; background:#243049; border:1px solid #3a4a6a; border-radius:5px 5px 0 0; color:#eaf2ff; font-size:12px; }
+#rv .rbp-tab--on { background:#2f3f5f; color:#ffe066; }
+#rv .rbp-basic { display:flex; gap:10px; }
+#rv .rbp-binfo { flex:0 0 44%; min-width:0; }
+#rv .rbp-bdata { display:grid; grid-template-columns:1fr; gap:2px; font-size:11px; }
+#rv .rbp-brow { display:flex; justify-content:space-between; gap:8px; padding:1px 3px; border-radius:3px; }
+#rv .rbp-brow--act { cursor:pointer; }
+#rv .rbp-brow--act:hover { background:rgba(255,255,255,.08); }
+#rv .rbp-bk { color:#8b93a7; } #rv .rbp-bv { color:#eaf2ff; }
+#rv .rbp-kizuna { display:flex; gap:4px; align-items:center; margin-top:6px; font-size:11px; }
+#rv .rbp-kizuna-icon { color:#ff8f8f; }
+/* 右·精灵能力子区域（顶部「精灵能力 剩余:xx」+ 6 行属性 + 底部 分配/重置/快速） */
+#rv .rbp-cap { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:4px; }
+#rv .rbp-cap-hd { display:flex; justify-content:space-between; align-items:baseline; border-bottom:1px solid #1c2740; padding-bottom:3px; }
+#rv .rbp-cap-title { font-weight:700; color:#ffe066; font-size:13px; }
+#rv .rbp-cap-remain { color:#9fd0ff; font-size:11px; }
+#rv .rbp-cap-rows { display:flex; flex-direction:column; gap:2px; }
+#rv .rbp-cap-row { display:grid; grid-template-columns:16px 1fr 42px 70px; align-items:center; font-size:12px; padding:1px 3px; }
+#rv .rbp-cap-arrow { text-align:center; font-size:11px; }
+#rv .rbp-cap-arrow--up { color:#7fe08a; }
+#rv .rbp-cap-arrow--down { color:#ff8f8f; }
+#rv .rbp-cap-arrow--flat { color:#8b93a7; }
+#rv .rbp-cap-name { color:#eaf2ff; }
+#rv .rbp-cap-val { color:#ffe066; text-align:right; }
+#rv .rbp-cap-ev { display:flex; align-items:center; justify-content:flex-end; gap:3px; color:#cfe0ff; }
+#rv .rbp-cap-evn { min-width:22px; text-align:center; }
+#rv .rbp-cap-step { cursor:pointer; width:16px; height:16px; line-height:14px; text-align:center; background:#243049; border:1px solid #3a4a6a; border-radius:3px; color:#eaf2ff; font-size:12px; }
+#rv .rbp-cap-step:hover { background:#2f3f5f; }
+#rv .rbp-cap-acts { display:flex; gap:6px; margin-top:4px; }
+#rv .rbp-cap-btn { flex:1 1 0; cursor:pointer; padding:4px 0; background:#243049; color:#eaf2ff; border:1px solid #3a4a6a; border-radius:5px; font-size:12px; text-align:center; }
+#rv .rbp-cap-btn:hover { background:#2f3f5f; }
+#rv .rbp-cap-btn--off { opacity:.35; cursor:default; }
+#rv .rbp-skill-acts { display:flex; gap:6px; margin-top:6px; }
+#rv .rbp-skill-btn { cursor:pointer; padding:3px 10px; background:#243049; border:1px solid #3a4a6a; border-radius:5px; color:#eaf2ff; font-size:11px; }
+#rv .rbp-skill-btn:hover { background:#2f3f5f; }
+#rv .rbp-skill-btn--on { background:#33507f; border-color:#5f86c8; }
+/* ── 精灵技能面板（docs/view/panel/petbag/skill-panel-design.md §4.2）────────────────────────
+   ⚠️ 不加 z-index（同 .rbg-* 的实测结论：加了会跳出 .rv-panel 的层叠上下文、盖住后开的模态）。 */
+/* ── 技能页签（入口页 · 只读当前技能 + 两颗钮）──────────────────────────────── */
+#rv .rbp-sk { display:flex; flex-direction:column; gap:5px; font-size:12px; min-height:0; }
+#rv .rbp-sk-hd { display:flex; align-items:center; gap:6px; color:#9fd0ff; font-size:12px; }
+#rv .rbp-sk-hd-t { flex:0 0 auto; }
+#rv .rbp-sk-slots { display:flex; gap:4px; }
+#rv .rbp-sk-cell { flex:1 1 0; min-width:0; display:flex; flex-direction:column; justify-content:center; gap:2px;
+  height:52px; padding:4px 6px; background:rgba(255,255,255,.04); border:1px solid #26324c; border-radius:5px; overflow:hidden; }
+/* ⚠️ 必杀格是**整行**：只能 width:100%；写成 flex:0 0 100% 会把「高度」撑成 100%（挂列容器上时） */
+#rv .rbp-sk-cell--super { border-color:#6b4fa0; background:rgba(180,120,255,.12); }
+/* 技能名**完整显示**：可换行、不截断（人类 2026-10-19） */
+/* 技能名**占满整格宽**（人类 2026-10-19：奋力突破等四字名要完整显示）⇒ 名字独占第一行，可换行、不截断 */
+#rv .rbp-sk-name { width:100%; min-width:0; color:#fff; font-size:13px; line-height:1.25; word-break:break-word; }
+#rv .rbp-sk-sub { display:flex; align-items:center; gap:6px; }
+#rv .rbp-sk-cat { flex:0 0 auto; color:#9fd0ff; font-size:11px; white-space:nowrap; }
+#rv .rbp-sk-pow { flex:0 0 auto; color:#8b93a7; font-size:11px; white-space:nowrap; }
+/* ── 技能悬浮详情框（跟随鼠标 · 挂在 body 上、position:fixed ⇒ 不被面板 overflow 裁剪）──────
+   z-index 只给这一个 body 级元素：它不属于 .rv-panel 的层叠上下文，不会影响面板之间的层叠。 */
+.rb-skilltip { position:fixed; z-index:9999; max-width:320px; padding:6px 9px; pointer-events:none;
+  background:rgba(8,14,26,.96); border:1px solid #4a5a7a; border-radius:6px; color:#eaf2ff;
+  font-size:12px; line-height:1.5; white-space:pre-line; box-shadow:0 6px 20px rgba(0,0,0,.6); }
+
+/* ── 技能调整盖板（第二层面板 · 上游 Pet Swap Skill 的 820×270 量级）─────────────────
+   ⚠️ 不自带遮罩（照上游：它是背包面板的子层，外部仍可点 ⇒ 右上角 ✕ 仍是背包面板自己那颗）。
+   ⚠️ 不加 z-index（同 .rbg-* 的实测结论：加了会跳出 .rv-panel 的层叠上下文）。 */
+/* ── 技能调整盖板（第二层面板 · 人类 2026-10-19「和精灵背包面板一样大」）─────────────
+   盒体尺寸/观感与 .rbp-box 逐项对齐（948×524 @ left6/top8），只换内容。 */
+#rv .rbx-box { position:absolute; left:6px; top:8px; width:948px; height:524px; pointer-events:auto;
+  background:#0d1420; border:2px solid #3a4a6a; border-radius:10px; color:#e6ecf6; box-shadow:0 8px 30px rgba(0,0,0,.6);
+  display:flex; flex-direction:column; gap:6px; padding:8px; box-sizing:border-box; }
+/* 标题层：与背包面板同一版式（标题居中 + ✕ 靠右；这颗 ✕ = 关掉整个精灵背包面板） */
+#rv .rbx-top { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:8px; }
+#rv .rbx-title { font-weight:700; color:#ffe066; font-size:15px; text-align:center; }
+#rv .rbx-x { cursor:pointer; color:#fff; padding:2px 8px; background:#5a2a2a; border-radius:5px; justify-self:end; font-size:13px; }
+#rv .rbx-x:hover { background:#6d3333; }
+#rv .rbx-hd { display:flex; align-items:center; gap:8px; color:#9fd0ff; font-size:13px; }
+#rv .rbx-hd-t { flex:0 0 auto; }
+#rv .rbx-page { color:#8b93a7; }
+#rv .rbx-pagebtn { cursor:pointer; padding:2px 12px; border:1px solid #3a4a6a; border-radius:5px; color:#eaf2ff; background:#1b2740; font-size:13px; }
+#rv .rbx-pagebtn:hover { background:#2f3f5f; }
+#rv .rbx-slots { display:flex; gap:8px; }
+#rv .rbx-div { height:6px; background:#1c2740; border-radius:3px; }
+#rv .rbx-cell { flex:1 1 0; min-width:0; cursor:pointer; display:flex; flex-direction:column; justify-content:center; gap:3px;
+  height:76px; padding:6px 12px; background:rgba(255,255,255,.05); border:1px solid #2c3a58; border-radius:8px; overflow:hidden; }
+#rv .rbx-cell:hover { background:rgba(255,255,255,.1); }
+#rv .rbx-cell--ro { cursor:default; }
+#rv .rbx-cell--super { border-color:#6b4fa0; background:rgba(180,120,255,.14); }
+#rv .rbx-cell--on { border-color:#ffd479; background:rgba(255,212,121,.16); }
+/* 技能名**占满整格宽**、可换行不截断（人类 2026-10-19）；第二行才是 类别 + 威力 */
+#rv .rbx-name { width:100%; min-width:0; color:#fff; font-size:16px; line-height:1.3; word-break:break-word; }
+#rv .rbx-sub { display:flex; align-items:center; gap:8px; }
+#rv .rbx-cat { flex:0 0 auto; color:#9fd0ff; font-size:13px; white-space:nowrap; }
+#rv .rbx-pow { flex:0 0 auto; color:#8b93a7; font-size:13px; white-space:nowrap; }
+/* 灰格（未习得）= 与正常格**同尺寸**，只改观感：半透明 + 虚线边（人类 2026-10-19：各个技能块大小一致） */
+#rv .rbx-cell--ghost { cursor:default; opacity:.5; border-style:dashed; border-color:#39445f; background:rgba(255,255,255,.03); }
+#rv .rbx-cell--ghost:hover { background:rgba(255,255,255,.05); }
+#rv .rbx-lv { flex:0 0 auto; color:#ffd76a; font-size:11px; white-space:nowrap; }
+#rv .rbx-note { color:#6f7b93; font-size:11px; }
+#rv .rbx-foot { display:flex; align-items:center; gap:12px; margin-top:auto;
+  background:rgba(0,0,0,.3); border:1px solid #26324c; border-radius:8px; padding:8px 12px; }
+#rv .rbx-tip { flex:1 1 auto; color:#cfe0ff; font-size:13px; white-space:pre-line; }
+#rv .rbx-back { cursor:pointer; padding:6px 20px; background:#243049; border:1px solid #3a4a6a; border-radius:6px; color:#eaf2ff; font-size:13px; }
+#rv .rbx-back:hover { background:#2f3f5f; }
+#rv .rbp-resist-empty,#rv .rbp-detail-empty,#rv .rbp-col-empty { color:#8b93a7; font-size:12px; }
+
+/* 精灵道具面板 (rbp-item-*, 信息区可换内容之一): 标签行 + 3 行 6 列网格 */
+#rv .rbp-item-tabs { display:flex; gap:4px; margin-bottom:6px; }
+#rv .rbp-item-tab { cursor:pointer; padding:3px 10px; background:#243049; border:1px solid #3a4a6a; border-radius:5px; color:#eaf2ff; font-size:12px; }
+#rv .rbp-item-tab--on { background:#2f3f5f; color:#ffe066; }
+#rv .rbp-item-grid { display:grid; grid-template-columns:repeat(6,1fr); grid-auto-rows:48px; gap:5px; }
+#rv .rbp-item-cell { border:1px dashed #2b3242; border-radius:6px; background:rgba(255,255,255,.02); }
+#rv .rbp-item-pend { font-size:11px; color:#8b93a7; margin-top:6px; }
+
+/* 操作列 (8 钮) */
+#rv .rbp-act { pointer-events:auto; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:2px 4px; background:#243049; color:#eaf2ff; border-radius:5px; font-size:12px; border:1px solid #3a4a6a; text-align:center; overflow:hidden; }
+#rv .rbp-act:hover { background:#2f3f5f; }
+#rv .rbp-act--off { opacity:.35; cursor:default; }
+
+/* 仓库 (rbs-*): 复用 rbg-grid 构件; 筛选/排序长在仓库里 (C1 §6.3) */
+#rv .rbs-box { position:absolute; left:40px; top:34px; width:880px; height:472px; pointer-events:auto;
+  background:#0d1420; border:2px solid #3a4a6a; border-radius:10px; color:#e6ecf6; box-shadow:0 8px 30px rgba(0,0,0,.6);
+  display:grid; grid-template-columns:1fr 130px; grid-template-rows:32px auto auto 128px 1fr 22px; gap:6px; padding:8px; box-sizing:border-box; }
+#rv .rbs-head { grid-column:1 / span 2; grid-row:1; display:flex; align-items:center; gap:8px; }
+#rv .rbs-title { font-weight:700; color:#ffe066; font-size:15px; }
+#rv .rbs-money { color:#9fd0ff; font-size:12px; }
+#rv .rbs-close { cursor:pointer; color:#fff; padding:2px 8px; background:#5a2a2a; border-radius:5px; }
+#rv .rbs-filter { grid-column:1 / span 2; grid-row:2; }
+#rv .rbs-sort { grid-column:1 / span 2; grid-row:3; }
+#rv .rbs-box .rbg-grid { grid-column:1 / span 2; grid-row:4; display:flex; align-items:center; gap:6px; }
+#rv .rbs-detail { grid-column:1; grid-row:5; overflow-y:auto; padding:6px 8px; border:1px solid #1c2740; border-radius:8px; }
+#rv .rbs-acts { grid-column:2; grid-row:5; display:flex; flex-direction:column; gap:6px; }
+#rv .rbs-act { pointer-events:auto; cursor:pointer; padding:6px; background:#243049; color:#eaf2ff; border:1px solid #3a4a6a; border-radius:5px; font-size:12px; text-align:center; }
+#rv .rbs-act:hover { background:#2f3f5f; } #rv .rbs-act--off { opacity:.35; cursor:default; }
+#rv .rbs-note { grid-column:1 / span 2; grid-row:6; color:#ffd76a; font-size:12px; }
+
+/* 筛选栏 / 排序栏 (filterBar.js / sortBar.js; 现长在仓库里) */
+#rv .rbp-filter,#rv .rbp-sort { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:3px 0; border-bottom:1px solid #16203a; }
+#rv .rbp-flabel,#rv .rbp-slabel { color:#9fd0ff; font-size:12px; }
+#rv .rbp-ffield { display:flex; align-items:center; gap:3px; }
+#rv .rbp-flab { color:#8b93a7; font-size:11px; }
+#rv .rbp-fsel,#rv .rbp-finput { background:#111a2b; color:#eaf2ff; border:1px solid #3a4a6a; border-radius:4px; font-size:11px; }
+#rv .rbp-finput { width:70px; }
+#rv .rbp-freset,#rv .rbp-sortbtn { cursor:pointer; padding:2px 8px; background:#243049; border:1px solid #3a4a6a; border-radius:4px; color:#eaf2ff; font-size:11px; }
+#rv .rbp-sortbtn--on,#rv .rbp-sortbtn:hover { background:#2f3f5f; }
+#rv .rbp-sortrow { display:flex; gap:5px; flex-wrap:wrap; }
+
+/* 性格层 (rbp-pers-*): 全屏遮罩 + 滚动列表 (基础信息里的「性格」触达) */
+#rv .rbp-pers-mask { position:absolute; inset:0; background:rgba(0,0,0,.6); pointer-events:auto; }
+#rv .rbp-pers-box { position:absolute; left:180px; top:80px; width:600px; height:360px; background:#0d1420; border:2px solid #3a4a6a; border-radius:10px; padding:12px; pointer-events:auto; color:#eaf2ff; box-sizing:border-box; }
+#rv .rbp-pers-title { color:#ffe066; font-weight:700; font-size:15px; }
+#rv .rbp-pers-list { display:flex; flex-direction:column; gap:4px; margin-top:8px; max-height:280px; overflow-y:auto; }
+#rv .rbp-pers-item { display:flex; gap:10px; align-items:center; padding:6px 10px; background:rgba(255,255,255,.04); border-radius:6px; cursor:pointer; }
+#rv .rbp-pers-item:hover { background:rgba(255,255,255,.09); }
+#rv .rbp-pers-item--on { outline:2px solid #ffe066; }
+#rv .rbp-pers-v { color:#fff; font-weight:700; min-width:20px; }
+/* 性格格（上游 PersonalityCell）：名字 + 五维加成格（物攻/特攻/物防/特防/速度；体力永不加成不画）。
+   tone = up 涨（绿）/ down 跌（红）/ flat 平（白划一）—— 取值来自 L2 content.personalityRows，视图零算数。 */
+#rv .rbp-pers-n { color:#eaf2ff; font-weight:600; min-width:44px; }
+#rv .rbp-pers-cells { display:flex; gap:3px; margin-left:auto; }
+#rv .rbp-pers-cell { min-width:34px; text-align:center; font-size:10px; padding:1px 4px; border-radius:3px; background:rgba(255,255,255,.05); }
+#rv .rbp-pers-cell--up { color:#7fe08a; }
+#rv .rbp-pers-cell--down { color:#ff8f8f; }
+#rv .rbp-pers-cell--flat { color:#8b93a7; }
+/* 底部说明行（上游 SetNote = Status.GetPersonalityBuffDescription） */
+#rv .rbp-pers-note { margin-top:6px; font-size:11px; color:#ffe066; min-height:16px; }
+#rv .rbp-pers-esc { position:absolute; right:10px; top:8px; cursor:pointer; color:#fff; padding:2px 8px; background:#5a2a2a; border-radius:5px; }
+
+/* ── 重启原生 道具背包模态面板 .rbi-* (只读; U4 道具支, 1a+2a) ── */
+#rv .rbi-box { position:absolute; left:120px; top:50px; width:720px; height:430px; pointer-events:auto;
+  display:flex; flex-direction:column; background:#0f1420; border:1px solid #2b3a58; border-radius:10px;
+  box-shadow:0 8px 30px rgba(0,0,0,.6); color:#eaf2ff; }
+#rv .rbi-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid #263450; }
+#rv .rbi-title { font-weight:700; color:#ffe066; font-size:15px; }
+#rv .rbi-money { color:#9fd0ff; font-size:12px; }
+#rv .rbi-close { cursor:pointer; color:#fff; padding:2px 8px; background:#5a2a2a; border-radius:5px; }
+#rv .rbi-body { flex:1 1 auto; display:flex; min-height:0; }
+#rv .rbi-lists { width:280px; overflow-y:auto; padding:8px; border-right:1px solid #263450; }
+#rv .rbi-col-title { font-size:12px; color:#9fd0ff; margin-bottom:4px; }
+#rv .rbi-cells { display:flex; flex-wrap:wrap; gap:6px; }
+#rv .rbi-cell { position:relative; width:82px; padding:4px; border:2px solid #666; border-radius:6px;
+  background:rgba(255,255,255,.03); cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:2px; }
+#rv .rbi-cell--on { outline:2px solid #ffe066; }
+#rv .rbi-tile { width:26px; height:26px; border-radius:5px; box-shadow:inset 0 0 0 1px rgba(255,255,255,.15); }
+#rv .rbi-cell-name { font-size:11px; text-align:center; line-height:1.15; }
+#rv .rbi-cell-count { font-size:10px; color:#ffe066; }
+#rv .rbi-detail { flex:1 1 auto; overflow-y:auto; padding:10px 12px; }
+#rv .rbi-dh { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+#rv .rbi-dh-name { font-size:18px; font-weight:700; color:#fff; }
+#rv .rbi-dh-type { font-size:12px; }
+#rv .rbi-dh-count { font-size:12px; color:#ffe066; }
+#rv .rbi-sect { font-size:12px; color:#9fd0ff; margin:8px 0 4px; border-bottom:1px solid #1c2740; }
+#rv .rbi-desc, #rv .rbi-eff { font-size:12px; color:#cfe0ff; line-height:1.4; }
+#rv .rbi-efflist { display:flex; flex-direction:column; gap:2px; margin-top:4px; }
+#rv .rbi-effrow { font-size:11px; color:#8b93a7; padding:2px 4px; background:rgba(255,255,255,.03); border-radius:4px; }
+#rv .rbi-efflist-empty { font-size:11px; color:#8b93a7; }
+#rv .rbi-effnote { font-size:11px; color:#7fb3ff; margin-top:4px; }
+#rv .rbi-acts { display:flex; gap:8px; margin-top:10px; }
+#rv .rbi-act { pointer-events:auto; cursor:pointer; padding:5px 10px; background:#243049; color:#eaf2ff;
+  border:1px solid #35507a; border-radius:6px; font-size:12px; }
+#rv .rbi-act--off { opacity:.45; cursor:not-allowed; }
+#rv .rbi-note { padding:6px 12px; min-height:18px; color:#ffd76a; font-size:12px; }
+#rv .rbi-col-empty { color:#8b93a7; font-size:11px; }
+
+/* ── 重启原生 商店模态面板 .rb-shop-* (U·商店支) ── */
+#rv .rb-shop-box { position:absolute; left:110px; top:34px; width:740px; height:462px; pointer-events:auto; background:#0e1626; border:1px solid #263450; border-radius:8px; display:flex; flex-direction:column; color:#eaf2ff; }
+#rv .rb-shop-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid #263450; }
+#rv .rb-shop-title { font-weight:700; color:#ffe066; font-size:15px; }
+/* 货币 = 货币道具(赛尔豆 id1 / 星钻 id2)的图标 + 数额，不再是 '◈'/'✦' 纯文本 */
+#rv .rb-shop-money { margin-left:auto; display:flex; align-items:center; gap:12px; font-size:12px; }
+#rv .rb-shop-cur { display:inline-flex; align-items:center; gap:3px; color:#ffe066; }
+#rv .rb-shop-cur-num { font-family:"RbbNum","DejaVu Sans Mono",monospace; }
+#rv .rb-shop-close { cursor:pointer; color:#fff; padding:2px 8px; background:#5a2a2a; border-radius:5px; }
+#rv .rb-shop-tabs { display:flex; gap:4px; padding:6px 12px; border-bottom:1px solid #1c2740; flex-wrap:wrap; }
+#rv .rb-shop-tab { cursor:pointer; padding:3px 9px; background:#1b2740; border:1px solid #2a3a5a; border-radius:5px; font-size:12px; color:#cfe0ff; }
+#rv .rb-shop-tab--on { outline:2px solid #ffe066; color:#ffe066; }
+#rv .rb-shop-mode { display:flex; gap:6px; padding:6px 12px; }
+#rv .rb-shop-modebtn { cursor:pointer; padding:3px 12px; background:#1b2740; border:1px solid #2a3a5a; border-radius:5px; font-size:13px; color:#cfe0ff; }
+#rv .rb-shop-modebtn--on { background:#2a3a5a; color:#ffe066; outline:1px solid #ffe066; }
+#rv .rb-shop-body { flex:1 1 auto; display:flex; min-height:0; }
+/* 列表列改成定页网格 + 底部箭头翻页：不再整列滑动（overflow 收成 hidden，页码自己管）。 */
+#rv .rb-shop-lists { flex:0 0 300px; width:300px; overflow:hidden; padding:8px; border-right:1px solid #263450;
+  display:flex; flex-direction:column; }
+#rv .rb-shop-col { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; }
+#rv .rb-shop-col-title { font-size:12px; color:#9fd0ff; margin-bottom:4px; flex:0 0 auto; }
+#rv .rb-shop-grid { display:flex; flex-wrap:wrap; align-content:flex-start; gap:6px; overflow:hidden; flex:1 1 auto; min-height:0; }
+/* 格内竖排居中：图标/名字/价格一行行叠好，别让 26px 的图吊在左边。 */
+#rv .rb-shop-cell { position:relative; width:84px; padding:4px; border:2px solid #666; border-radius:6px; cursor:pointer;
+  background:#10192c; display:flex; flex-direction:column; align-items:center; box-sizing:border-box; }
+#rv .rb-shop-cell--on { outline:2px solid #ffe066; }
+#rv .rb-shop-tile { width:100%; height:100%; border-radius:5px; box-shadow:inset 0 0 0 1px rgba(255,255,255,.15); }
+#rv .rb-shop-ico { position:relative; flex:0 0 auto; }
+#rv .rb-shop-ico ruffle-player { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+#rv .rb-shop-img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; pointer-events:none; }
+/* 名字锁两行高(26px) => 每页三行等高，箭头翻页不会因文字长短跳格 */
+#rv .rb-shop-cell-name { width:100%; height:26px; overflow:hidden; font-size:11px; text-align:center; line-height:1.15; }
+/* 买入格的价格现在是一枚货币芯片(图标+数)，跟"持有 ×n"那行对齐 */
+#rv .rb-shop-cell-sub, #rv .rb-shop-cell .rb-shop-cur { width:100%; font-size:10px; color:#ffe066; justify-content:center; }
+#rv .rb-shop-detail { flex:1 1 auto; overflow-y:auto; padding:10px 12px; }
+/* align-items 改 center：详情头左边现在坐着一枚 56px 的大图，baseline 会把它顶到文字基线上飘着 */
+#rv .rb-shop-dh { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+#rv .rb-shop-bigico { flex:0 0 auto; padding:3px; border:1px solid #2a3a5a; border-radius:8px; background:#0b1120; }
+#rv .rb-shop-dh-name { font-size:18px; font-weight:700; color:#fff; }
+#rv .rb-shop-dh-type { font-size:12px; }
+#rv .rb-shop-dh-price { display:inline-flex; align-items:center; gap:3px; font-size:12px; color:#ffe066; }
+#rv .rb-shop-dh-price-lbl { color:#9fd0ff; }
+#rv .rb-shop-dh-owned { font-size:12px; color:#9fd0ff; }
+#rv .rb-shop-sect { font-size:12px; color:#9fd0ff; margin:8px 0 4px; border-bottom:1px solid #1c2740; }
+#rv .rb-shop-desc, #rv .rb-shop-eff { font-size:12px; color:#cfe0ff; line-height:1.4; }
+#rv .rb-shop-qty { display:flex; gap:8px; align-items:center; margin-top:10px; }
+#rv .rb-shop-qtybtn { cursor:pointer; width:24px; height:24px; text-align:center; line-height:22px; background:#243049; color:#eaf2ff; border-radius:5px; }
+#rv .rb-shop-qtynum { min-width:24px; text-align:center; }
+#rv .rb-shop-acts { display:flex; gap:8px; margin-top:10px; }
+#rv .rb-shop-buy, #rv .rb-shop-sell { pointer-events:auto; cursor:pointer; padding:5px 14px; background:#2e7d32; color:#fff; border-radius:5px; font-size:13px; }
+#rv .rb-shop-sell { background:#2a5a8a; }
+#rv .rb-shop-buy--off, #rv .rb-shop-sell--off { opacity:.45; cursor:not-allowed; }
+/* 左右箭头翻页条：‹ 页/总 › ，首页/末页对应箭头置灰 */
+#rv .rb-shop-pager { flex:0 0 auto; display:flex; align-items:center; justify-content:center; gap:10px; padding-top:6px; }
+#rv .rb-shop-pagebtn { cursor:pointer; width:28px; height:22px; line-height:20px; text-align:center; font-size:15px;
+  background:#243049; color:#eaf2ff; border:1px solid #3a4a6a; border-radius:5px; }
+#rv .rb-shop-pagebtn:hover { background:#2f3f5f; }
+#rv .rb-shop-pagebtn--off { opacity:.35; cursor:default; }
+#rv .rb-shop-pagebtn--off:hover { background:#243049; }
+#rv .rb-shop-pageno { font-size:12px; color:#9fd0ff; min-width:44px; text-align:center;
+  font-family:"RbbNum","DejaVu Sans Mono",monospace; }
+#rv .rb-shop-note { padding:6px 12px; min-height:18px; color:#ffd76a; font-size:12px; border-top:1px solid #1c2740; }
+#rv .rb-shop-col-empty, #rv .rb-shop-detail-empty { color:#8b93a7; font-size:11px; }
+
+/* ---- ★C3·WorldMap 世界地图面板 (docs/view/panel/worldmap/worldmap-impl.md §2；最小自绘 UI，非像素级美术) ---- */
+#rv .rb-wmap-box { position:absolute; left:140px; top:40px; width:680px; height:460px; pointer-events:auto; background:#0e1626; border:1px solid #263450; border-radius:8px; display:flex; flex-direction:column; color:#eaf2ff; }
+#rv .rb-wmap-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid #263450; }
+#rv .rb-wmap-title { font-size:17px; font-weight:bold; }
+#rv .rb-wmap-spacer { flex:1; }
+#rv .rb-wmap-nav { cursor:pointer; padding:3px 10px; background:#243049; border:1px solid #2f4568; border-radius:5px; font-size:13px; color:#cfe0ff; }
+#rv .rb-wmap-body { flex:1; overflow-y:auto; padding:10px 14px; }
+#rv .rb-wmap-group { margin-bottom:12px; }
+#rv .rb-wmap-gname { font-size:13px; color:#8fb0d8; margin-bottom:6px; }
+#rv .rb-wmap-grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; }
+#rv .rb-wmap-block { cursor:pointer; border:1px solid #2f4568; border-radius:6px; padding:6px 8px; background:#15233c; }
+#rv .rb-wmap-block:hover { border-color:#6ea0e0; }
+#rv .rb-wmap-bname { font-size:14px; }
+#rv .rb-wmap-blabel { font-size:11px; color:#7d93b5; }
+#rv .rb-wmap-locked { opacity:.45; cursor:not-allowed; }
+
+/* ---- ★C3·MiniMap 小地图面板 (docs/view/panel/minimap/minimap-impl.md §2/§4；上游 PNG 拼，非自绘美术) ----
+   框尺寸与全部矩形来自 blocks.js（= 面板框绝对像素，原点左上、y 向下），这里只定性不给坐标。
+   框在 960×540 内居中由 minimapPanel.js 现算（720×420 ⇒ 120,60 / 710×440 ⇒ 125,50）。 */
+#rv .rb-mmap-box { position:absolute; pointer-events:auto; overflow:hidden; background:#0b1120; border:1px solid #263450; border-radius:6px; color:#eaf2ff; }
+#rv .rb-mmap-img { position:absolute; display:block; }
+#rv .rb-mmap-title { position:absolute; display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:bold; color:#fff; text-shadow:1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000; }
+#rv .rb-mmap-block { position:absolute; cursor:pointer; }
+#rv .rb-mmap-block:hover { background:rgba(110,160,224,.22); }
+#rv .rb-mmap-block--locked { cursor:not-allowed; opacity:.45; }
+#rv .rb-mmap-block--here { box-shadow:inset 0 0 0 2px #ffd76a; }
+#rv .rb-mmap-icon { position:absolute; left:0; top:0; width:100%; height:100%; display:block; }
+#rv .rb-mmap-label { position:absolute; display:flex; align-items:center; justify-content:center; font-size:16px; color:#fff; text-shadow:1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000; pointer-events:none; }
+#rv .rb-mmap-here { position:absolute; right:2px; top:2px; font-size:11px; color:#ffd76a; pointer-events:none; }
+#rv .rb-mmap-close { position:absolute; cursor:pointer; }
+#rv .rb-mmap-tip { position:absolute; display:none; pointer-events:none; z-index:2; padding:3px 8px; background:#000; border:1px solid #fff; border-radius:4px; font-size:13px; color:#fff; white-space:nowrap; }
+
+/* ---- C4·活动面板 (rb-act-*，2026-10-19；docs/view/panel/activity/) ----
+   版式照 shop/wmap：左「活动列表」列 + 右「详情」；顶搜索框；底翻页。文字格为主（美术未搬，同技能格口径），
+   背景 PNG 尽力挂 Resources/Maps/bg（缺图由 mountImg 自陈 asset-missing、不伪造）。坐标 = 960×540 逻辑像素。 */
+#rv .rb-act-box { position:absolute; left:120px; top:36px; width:720px; height:470px; pointer-events:auto; background:#0e1626; border:1px solid #263450; border-radius:8px; display:flex; flex-direction:column; color:#eaf2ff; font-family:"Noto Sans CJK SC",system-ui,sans-serif; }
+#rv .rb-act-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid #263450; }
+#rv .rb-act-title { font-size:17px; font-weight:bold; }
+#rv .rb-act-close { cursor:pointer; color:#fff; padding:2px 8px; background:#5a2a2a; border-radius:5px; }
+#rv .rb-act-toolbar { padding:6px 12px; border-bottom:1px solid #1d2942; }
+#rv .rb-act-search { width:240px; padding:4px 8px; background:#0a1120; color:#dce8ff; border:1px solid #2f4568; border-radius:5px; font-size:13px; }
+#rv .rb-act-body { flex:1 1 auto; display:flex; min-height:0; }
+#rv .rb-act-lists { flex:0 0 280px; width:280px; overflow:hidden; padding:8px; border-right:1px solid #263450; display:flex; flex-direction:column; }
+#rv .rb-act-col { display:flex; flex-direction:column; min-height:0; flex:1 1 auto; }
+#rv .rb-act-col-title { font-size:12px; color:#8fb0d8; margin-bottom:6px; }
+#rv .rb-act-col-empty { color:#8b93a7; font-size:11px; }
+#rv .rb-act-list { flex:1 1 auto; overflow-y:auto; display:flex; flex-direction:column; gap:3px; }
+#rv .rb-act-row { cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 8px; background:#15233c; border:1px solid #2f4568; border-radius:5px; }
+#rv .rb-act-row:hover { border-color:#6ea0e0; }
+#rv .rb-act-row--on { background:#24406a; border-color:#6ea0e0; }
+#rv .rb-act-row-name { font-size:14px; }
+#rv .rb-act-row-type { font-size:11px; color:#7d93b5; flex:0 0 auto; }
+#rv .rb-act-pager { flex:0 0 auto; display:flex; align-items:center; justify-content:center; gap:10px; padding-top:6px; }
+#rv .rb-act-pagebtn { cursor:pointer; padding:2px 10px; background:#243049; border:1px solid #2f4568; border-radius:5px; color:#cfe0ff; }
+#rv .rb-act-pagebtn--off { opacity:.4; cursor:default; }
+#rv .rb-act-pageno { font-size:12px; color:#9fb4d6; }
+#rv .rb-act-detail { flex:1 1 auto; overflow-y:auto; padding:10px 12px; display:flex; flex-direction:column; gap:6px; }
+#rv .rb-act-detail-empty { color:#8b93a7; font-size:12px; }
+#rv .rb-act-bg { width:100%; height:150px; overflow:hidden; border:1px solid #2f4568; border-radius:6px; background:#0a1120; }
+#rv .rb-act-bg-img { width:100%; height:100%; object-fit:cover; display:block; }
+#rv .rb-act-d-name { font-size:16px; font-weight:bold; }
+#rv .rb-act-d-time { font-size:11px; color:#7d93b5; }
+#rv .rb-act-d-sect { font-size:12px; color:#8fb0d8; margin-top:6px; }
+#rv .rb-act-d-desc { font-size:13px; line-height:1.5; }
+#rv .rb-act-rewards { display:flex; flex-direction:column; gap:4px; }
+#rv .rb-act-reward-row { display:flex; flex-wrap:wrap; gap:6px; }
+#rv .rb-act-reward { font-size:12px; padding:2px 8px; background:#1b2f4d; border:1px solid #2f4568; border-radius:4px; color:#cfe0ff; }
+#rv .rb-act-acts { margin-top:8px; }
+#rv .rb-act-go { cursor:pointer; display:inline-block; padding:6px 22px; background:#2f6db0; border:1px solid #6ea0e0; border-radius:6px; color:#fff; font-size:14px; }
+#rv .rb-act-go--off { background:#243049; border-color:#2f4568; color:#7d93b5; cursor:default; }
+
+/* ---- C4·个人信息面板 (rb-pif-*，2026-10-20；docs/view/panel/playerinfo/) ----
+   640 宽居中框（深蓝系同 rb-act-*；★PI-equip 480→640、left 240→160 仍居中）：
+   名字行（两拍编辑）/ 称号下拉 / **两栏 split（左 = canvas 形象预览 + 已装配条图标+名，右 = 组标签 + 分页图标网格 36/页 · Ruffle 真图标 + 翻页条 / 阴影两态钮，★PI-g）** / 货币活读数 / 四功能钮。
+   旧立绘三态 `.rb-pif-portrait*` 已随 PIQ7 退役删除；旧名字牌格样式已随 PI-g 换图标格；高 = 内容自适应（split 定高 270，整框 ≤ 逻辑画布 540）。 */
+#rv .rb-pif-box { position:absolute; left:160px; top:64px; width:640px; height:auto; min-height:320px; pointer-events:auto; background:#0e1626; border:1px solid #263450; border-radius:8px; display:flex; flex-direction:column; color:#eaf2ff; font-family:"Noto Sans CJK SC",system-ui,sans-serif; }
+#rv .rb-pif-head { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid #263450; }
+#rv .rb-pif-title { font-size:17px; font-weight:bold; }
+#rv .rb-pif-spacer { flex:1 1 auto; }
+#rv .rb-pif-close { cursor:pointer; color:#fff; padding:2px 8px; background:#5a2a2a; border-radius:5px; }
+#rv .rb-pif-namerow { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid #1d2942; }
+#rv .rb-pif-name { font-size:18px; font-weight:bold; flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#rv .rb-pif-name-input { flex:1 1 auto; padding:5px 8px; background:#0a1120; color:#dce8ff; border:1px solid #2f4568; border-radius:5px; font-size:15px; }
+#rv .rb-pif-edit { cursor:pointer; flex:0 0 auto; width:20px; height:20px; background-size:contain; background-repeat:no-repeat; background-position:center; border:1px solid #2f4568; border-radius:4px; }
+#rv .rb-pif-achrow { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid #1d2942; }
+#rv .rb-pif-achlabel { font-size:13px; color:#8fb0d8; flex:0 0 auto; }
+#rv .rb-pif-ach { flex:1 1 auto; padding:4px 6px; background:#0a1120; color:#dce8ff; border:1px solid #2f4568; border-radius:5px; font-size:13px; }
+/* ★PI-f 两栏（design §3.8）：定高 270 = 整框（36+42+38+270+30+46+边框）≈464，top:64 下沿 528 < 逻辑 540 */
+#rv .rb-pif-split { display:flex; gap:10px; padding:8px 12px; border-bottom:1px solid #1d2942; flex:0 0 auto; height:270px; }
+#rv .rb-pif-left { flex:0 0 236px; display:flex; flex-direction:column; align-items:center; gap:6px; min-width:0; }
+#rv .rb-pif-canvas { flex:0 0 auto; width:200px; height:190px; background:#0a1120; border:1px solid #2f4568; border-radius:6px; }
+#rv .rb-pif-equipped { width:100%; display:flex; flex-wrap:wrap; gap:4px; overflow-y:auto; min-height:0; flex:1 1 auto; align-content:flex-start; }
+#rv .rb-pif-eqcell { display:flex; align-items:center; gap:4px; font-size:11px; padding:2px 6px; background:#1b2f4d; border:1px solid #2f4568; border-radius:4px; }
+#rv .rb-pif-eqslot { color:#8fb0d8; }
+#rv .rb-pif-eqname { color:#eaf2ff; max-width:90px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#rv .rb-pif-eqoff { cursor:pointer; color:#ffd76a; border:1px solid #6a5a2a; border-radius:3px; padding:0 4px; font-size:10px; }
+/* ★PI-g 右栏 = 组标签 + 分页网格（design §3.8）：滚动去掉，改「标签行 + 当前页网格（rbody 内滚）+ 翻页条」；格子 = 44px Ruffle 图标 */
+#rv .rb-pif-right { flex:1 1 auto; display:flex; flex-direction:column; gap:6px; min-width:0; }
+#rv .rb-pif-tabs { display:flex; flex-wrap:wrap; gap:4px; flex:0 0 auto; }
+#rv .rb-pif-tab { cursor:pointer; padding:2px 9px; font-size:12px; background:#16233c; border:1px solid #2f4568; border-radius:5px; color:#cfe0ff; }
+#rv .rb-pif-tab:hover { border-color:#6ea0e0; }
+#rv .rb-pif-tab--on { background:#2f6db0; border-color:#6ea0e0; color:#fff; }
+#rv .rb-pif-rbody { flex:1 1 auto; overflow-y:auto; min-height:0; }
+#rv .rb-pif-grid { display:grid; grid-template-columns:repeat(6, 48px); gap:4px; align-content:start; }
+#rv .rb-pif-pager { display:flex; align-items:center; justify-content:center; gap:12px; flex:0 0 auto; }
+#rv .rb-pif-pagebtn { cursor:pointer; padding:0 12px; background:#243049; border:1px solid #2f4568; border-radius:5px; color:#cfe0ff; font-size:14px; line-height:16px; }
+#rv .rb-pif-pagebtn:hover { border-color:#6ea0e0; }
+#rv .rb-pif-pagebtn--off { opacity:.35; pointer-events:none; }
+#rv .rb-pif-pageinfo { font-size:12px; color:#8fb0d8; }
+#rv .rb-pif-groupcells { display:flex; flex-wrap:wrap; gap:4px; }
+#rv .rb-pif-cell { position:relative; cursor:pointer; width:48px; height:48px; display:flex; align-items:center; justify-content:center; background:#16233c; border:1px solid #2f4568; border-radius:5px; overflow:hidden; }
+#rv .rb-pif-cell:hover { border-color:#6ea0e0; }
+#rv .rb-pif-cell--on { border-color:#6ea0e0; box-shadow:0 0 4px #6ea0e0; }
+#rv .rb-pif-grouphint { font-size:11px; color:#8b93a7; }
+#rv .rb-pif-groundbtn { cursor:pointer; padding:3px 12px; font-size:12px; background:#16233c; border:1px solid #2f4568; border-radius:5px; color:#cfe0ff; }
+#rv .rb-pif-groundbtn--on { background:#2f6db0; border-color:#6ea0e0; color:#fff; }
+/* ★PI-j 颜色组（ALQ11）：色名钮 + 瓦片底色（--pif-color 由视图按色名上显示色；真画面在预览 canvas） */
+#rv .rb-pif-colorbtn { display:flex; align-items:center; gap:5px; cursor:pointer; padding:3px 8px; font-size:12px; background:#16233c; border:1px solid #2f4568; border-radius:5px; color:#cfe0ff; }
+#rv .rb-pif-colorbtn:hover { border-color:#6ea0e0; }
+#rv .rb-pif-colorbtn--on { background:#2f6db0; border-color:#6ea0e0; color:#fff; }
+#rv .rb-pif-colorchip { width:14px; height:14px; border-radius:3px; background:var(--pif-color, #767f8f); border:1px solid rgba(255,255,255,.35); }
+#rv .rb-pif-colorname { font-size:12px; line-height:14px; }
+#rv .rb-pif-ico { position:relative; }
+#rv .rb-pif-currow { display:flex; align-items:center; gap:16px; padding:6px 12px; }
+#rv .rb-pif-curcell { display:flex; align-items:center; gap:5px; }
+#rv .rb-pif-cur { font-size:14px; color:#ffd76a; }
+#rv .rb-pif-btnrow { display:flex; align-items:center; gap:8px; padding:8px 12px; margin-top:auto; }
+#rv .rb-pif-btn { cursor:pointer; padding:6px 14px; background:#243049; border:1px solid #2f4568; border-radius:6px; color:#cfe0ff; font-size:13px; }
+#rv .rb-pif-btn:hover { border-color:#6ea0e0; }
+#rv .rb-pif-btn--shoot { padding:6px 10px; font-size:12px; }
+#rv .rb-pif-btn--on { background:#2f6db0; border-color:#6ea0e0; color:#fff; }
+
+/* ---- 演出期锁（上游 UI.SetBottomBarInteractable 同义；人类 2026-10-19）----
+   本回合动画播放期间底栏整块不可操作：挡鼠标靠 pointer-events，逻辑另有各 handler 的 busy 判据兜底。
+   压暗用 filter 而不是 opacity —— 只压内容，保住底图本身（免得看起来像面板坏了）。 */
+.rbb-bottombar--busy { pointer-events:none; cursor:progress; }
+.rbb-bottombar--busy .rbb-option,
+.rbb-bottombar--busy .rbb-superskill,
+.rbb-bottombar--busy .rbb-auto,
+.rbb-bottombar--busy .rbb-noop,
+.rbb-bottombar--busy .rbb-content { filter:grayscale(.55) brightness(.72); }
+.rbb-bottombar--busy::after { content:'演出中…'; position:absolute; left:50%; top:-26px; transform:translateX(-50%);
+   font:12px/1 "Noto Sans CJK SC",system-ui,sans-serif; color:#9fb4d6; background:#1b2f4dcc; border:1px solid #3d5a86;
+   border-radius:10px; padding:3px 12px; pointer-events:none; white-space:nowrap; }
+
+/* ---- U5 战斗舞台层 (地图背景 + 左右 fight SWF 精灵) ----
+   三层落 #wrap 原生 1200x660 空间, z 低于 #rv(z60): bg=1 · 宠=2 · DOM chrome(#rv)=60。
+   pointer-events:none 让点击穿到面板; ruffle-player 由 index.html 撑满 100%。 */
+/* F14：三层套在 #rb-stage 里，按视口宽整体缩放（JS 的 ResizeObserver 写 transform）。
+   基准 1200 宽 ⇒ scale=1，今天那套 1200x660 几何逐字节不变；rbb-full 全屏下背景才铺得满。 */
+#rb-stage { position:absolute; left:0; top:0; width:1200px; height:660px; transform-origin:0 0; pointer-events:none; }
+.rb-stage-box { position:absolute; left:0; top:0; width:1200px; height:660px; pointer-events:none; }
+#rb-bg { z-index:1; }
+#rb-fL, #rb-fR { z-index:2; }
+.rb-stage-note { position:absolute; left:8px; bottom:8px; color:#8b93a7; font-size:12px; pointer-events:none;
+   font-family:"Noto Sans CJK SC",system-ui,sans-serif; }
+
+/* ---- DB 伤害飘字层（#rb-dmg）—— 上游 BattleDamageAnimView/BattleDamageBackgroundView 的曲线逐段照搬。
+   设计真值 = docs/view/scene/battle/view-scene-battle-stage.md §9（尺寸/锚点常量在 restartFighterStage.js 顶部）。
+   外层 .rb-dmg 是 0×0 的锚点，动画驱动它；内层 .rb-dmg-in 负责居中，缩放由外层的 scale 连带作用到子元素。 */
+#rb-dmg { z-index:3; }
+.rb-dmg { position:absolute; left:0; top:0; width:0; height:0; pointer-events:none;
+   animation:rb-dmg-pop .92s ease-out forwards; }
+.rb-dmg-in { position:absolute; left:0; top:0; transform:translate(-50%,-50%); }
+.rb-dmg-bg { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); display:block; }
+.rb-dmg-num { position:absolute; top:50%; transform:translate(-50%,-50%); display:block; }
+.rb-dmg-crit { position:absolute; transform:translate(-50%,-50%); display:block; }
+/* Damage Bubble Me/Op：scale .6→1.4（0→.183s = 20%）、alpha .157→1→1(65%)→0；位移 = --x0 → --x1。 */
+@keyframes rb-dmg-pop {
+  0%   { transform:translate(var(--x0,150px), var(--y,210px)) scale(.6); opacity:.157; }
+  20%  { transform:translate(var(--x1,240px), var(--y,210px)) scale(calc(1.4 * var(--peak,1))); opacity:1; }
+  65%  { transform:translate(var(--x1,240px), var(--y,210px)) scale(calc(1.4 * var(--peak,1))); opacity:1; }
+  100% { transform:translate(var(--x1,240px), var(--y,210px)) scale(calc(1.4 * var(--peak,1))); opacity:0; }
+}
+/* Damage Bubble Absorb Me/Op：只有 y −150→−30（0→.333s = 66.7%），全程 alpha 1，.5s 后销毁。 */
+.rb-dmg--absorb { animation-name:rb-dmg-absorb; animation-duration:.5s; }
+@keyframes rb-dmg-absorb {
+  0%   { transform:translate(var(--x0,150px), calc(var(--y,210px) + 120px)); opacity:1; }
+  67%  { transform:translate(var(--x0,150px), var(--y,210px)); opacity:1; }
+  100% { transform:translate(var(--x0,150px), var(--y,210px)); opacity:1; }
+}
+/* HealInfo 彩色文字：dir=true（普通治疗/item）向下沉 50 后停 0.8s 淡出；否则先沉 50 再上浮 75（SetHealAnim）。 */
+.rb-heal { position:absolute; font:bold 30px/1 "Noto Sans CJK SC",system-ui,sans-serif; text-shadow:0 2px 3px #000;
+   pointer-events:none; animation:rb-heal-down 1.1s ease-out forwards; }
+.rb-heal--up { animation-name:rb-heal-up; animation-duration:1.3s; }
+@keyframes rb-heal-down {
+  0%   { transform:translate(-50%,0);    opacity:1; }
+  27%  { transform:translate(-50%,50px); opacity:1; }
+  100% { transform:translate(-50%,50px); opacity:0; }
+}
+@keyframes rb-heal-up {
+  0%   { transform:translate(-50%,50px); opacity:1; }
+  38%  { transform:translate(-50%,-25px); opacity:1; }
+  100% { transform:translate(-50%,-25px); opacity:0; }
+}
+
+/* ---- DB-B 屏震 / 闪白 / 技能气泡 / 暴击贴图 ----
+   屏震：FightCamaraController.ScreenShake 那个协程搬成了 JS 定时器（步长/步数/衰减都在
+   restartFighterStage.js 顶部），#rb-shake 只负责被晃；overscan 缩放写在 JS 的 transform 里。
+   transform-origin 用 center —— 靠「放大一点」保证位移时舞台边缘不露黑边。 */
+#rb-shake { transform-origin:50% 50%; will-change:transform; }
+/* 闪白：Flash.anim 逐点照搬（0→.12s，r 恒 1，g 0→1，b 0→1→.5→0，a 恒 1）。挂 #wrap 是因为
+   #rb-stage 只按宽缩放、高度未必铺满 rbb-full 的 100vh；z 高于 #rv(60) ⇒ 盖住整个窗口。 */
+#rb-flash { position:absolute; inset:0; z-index:90; pointer-events:none; background:#f00; opacity:0; display:none; }
+#rb-flash.is-on { display:block; animation:rb-flash .12s linear forwards; }
+@keyframes rb-flash {
+  0%   { background-color:rgb(255,0,0);   opacity:1; }
+  33%  { background-color:rgb(255,255,255); opacity:1; }
+  67%  { background-color:rgb(255,255,128); opacity:1; }
+  100% { background-color:rgb(255,255,0); opacity:1; }
+}
+/* 技能气泡：BattleSkillBubbleAnimView —— 底图 Sprites/Fight/Skill name bar.png（292×26），字号 14，字色 #00fff5，居中。 */
+.rb-skillbar { position:absolute; z-index:4; background-repeat:no-repeat; background-size:100% 100%; pointer-events:none;
+   font-family:"Noto Sans CJK SC",system-ui,sans-serif; }
+.rb-skillbar-t { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+   font-size:15px; font-weight:bold; white-space:nowrap; }
+/* 暴击贴图：BattleCriticalEffectView —— 位移/透明度由 JS 逐帧算（EaseOut + 三段 alpha），这里只管摆位与不拦点击。 */
+.rb-crit { position:absolute; z-index:3; transform:translate(-50%,-50%); pointer-events:none; opacity:0; }
+
+/* ---- 开始场景 / 选择角色场景（B5 · `rst-*`）----
+   血统：重启导出件 Assets/StaticResources/Sprites/Title/**（只此一条，STI4）；
+   设计与施工图：docs/view/scene/start/view-scene-start-design.md §3 · view-scene-start-impl.md §3/§4/§5。
+   坐标 = 960×refH 逻辑像素（host.js 给的画布；refH 在 match 模式下随窗口，舞台 1200×660 时 = 528）。
+   ⚠️ 所有盒子尺寸/偏移都是**从素材实测**来的（下注出处），不是随手摆的：
+     FirstPage.jpg 1200×660（与舞台同比例）· StartToolbar.png 1493×346（条带 y 177..258、中心球 r=86 @ (746,174)）
+     StartButton.png 341×346（球体 bbox 83,89–256,262 ⇒ 174px）· Choose Role.png 431×609（内容 286×40）
+     Other User Login.png 357×79 · Nickname Field.png 1202×663（输入框 490..725 / 463..503）· Male/Female.png 156×84。
+   指针：宿主 #rv/.rv-panel 放行 pointer-events，只有真占地方的件收（同 ui.css 顶部口径）。 */
+
+.rst-scene { position:absolute; inset:0; pointer-events:none; font-family:"Noto Sans CJK SC","Source Han Sans CN","WenQuanYi Micro Hei",system-ui,sans-serif; }
+
+/* ── 开始场景（#rst-title）── */
+.rst-bg      { position:absolute; inset:0; overflow:hidden; }
+.rst-bg-img  { width:100%; height:100%; object-fit:cover; display:block; }
+/* 背景"呼吸"（上游 TitleBackgroundMotion：cycle 8s、scale 0.015、offset(4,3)）。 */
+@keyframes rst-bg-breath { from { transform:scale(1) translate(0,0); } to { transform:scale(1.015) translate(4px,3px); } }
+.rst-title.is-ready .rst-bg-img { animation:rst-bg-breath 8s ease-in-out infinite alternate; }
+
+/* 开始图标（上游 "Game Icon" 入场：横向擦出 fillAmount + scale.x 0.08→1，delay .05s / dur 1s）。
+   动效挂在 .is-ready（背景 load 完）之后 —— 这就是 STI9"背景先到位"，不复制上游 A10 的竞态。 */
+.rst-icon { position:absolute; left:50%; top:56px; width:264px; height:128px; margin-left:-132px;
+            background-repeat:no-repeat; background-size:100% 100%;
+            transform-origin:0 50%; clip-path:inset(0 100% 0 0); opacity:0; }
+@keyframes rst-icon-in {
+  from { clip-path:inset(0 100% 0 0); transform:scaleX(.08); opacity:1; }
+  to   { clip-path:inset(0 0 0 0);    transform:scaleX(1);   opacity:1; }
+}
+.rst-title.is-ready .rst-icon { animation:rst-icon-in 1s cubic-bezier(.5,0,.5,1) .05s forwards; }
+
+/* 底部 HUD（人类 desc：左版本 / 中开始 / 右三钮）。整条 = StartToolbar.png 裁到内容带（图 y 90..258）。 */
+.rst-bottom { position:absolute; left:50%; margin-left:-480px; bottom:6px; width:960px; height:109px;
+              background-image:url("/projects/Seer2-Restart-Lite-main/Assets/StaticResources/Sprites/Title/StartToolbar.png");
+              background-repeat:no-repeat; background-size:960px 222px; background-position:0 -58px; }
+
+.rst-version        { position:absolute; left:96px; bottom:12px; }
+.rst-version-date   { display:block; color:#d8ecff; font-size:13px; letter-spacing:.5px; }
+.rst-version-string { display:block; color:#9dc2e6; font-size:12px; letter-spacing:.5px; }
+
+/* 开始钮 = StartButton.png 的球体（内容裁切：整体 341×346 缩到 217×220，原点偏移 -53/-57）。 */
+.rst-startbtn { position:absolute; left:50%; top:0; width:111px; height:109px; margin-left:-55.5px;
+                padding:0; border:0; background-color:transparent; background-repeat:no-repeat;
+                background-image:url("/projects/Seer2-Restart-Lite-main/Assets/StaticResources/Sprites/Title/StartButton.png");
+                background-size:217px 220px; background-position:-53px -57px;
+                pointer-events:auto; cursor:pointer;
+                transition:transform .28s cubic-bezier(.16,1,.3,1); }
+
+/* 工具三钮（左起 Resource / Mod / Help）。入场 = 上浮 36px + alpha 0→1，delay .16s / dur .42s（上游参数）。 */
+.rst-toolbar { position:absolute; right:60px; bottom:14px; display:flex; gap:10px;
+               opacity:0; transform:translateY(36px); }
+@keyframes rst-toolbar-in { to { opacity:1; transform:translateY(0); } }
+.rst-title.is-ready .rst-toolbar { animation:rst-toolbar-in .42s ease-out .16s forwards; }
+
+.rst-tool { width:88px; height:30px; padding:0; pointer-events:auto; cursor:pointer;
+            color:#e6f2ff; font-size:13px; letter-spacing:1px;
+            background:linear-gradient(#2a5b96cc,#12294acc); border:1px solid #7fb4e6aa; border-radius:6px;
+            text-shadow:0 1px 2px #000a; transition:transform .28s cubic-bezier(.16,1,.3,1), background-color .2s; }
+.rst-tool.is-disabled { opacity:.45; filter:grayscale(.7); }
+/* 悬停反馈（上游 StartButton / TitleToolbarButtonHoverFeedback：放大 ×1.06 + 上浮 4px，指数缓动） */
+.rst-tool:hover, .rst-startbtn:hover { transform:scale(1.06) translateY(-4px); }
+
+/* ── 选择角色场景（#rst-login）── */
+.rst-login-bg    { position:absolute; inset:0; background-repeat:no-repeat; background-size:100% 100%; }
+.rst-login-noise { position:absolute; inset:0; background-repeat:no-repeat; background-size:100% 100%;
+                   opacity:.3; mix-blend-mode:screen; }
+.rst-login-title { position:absolute; left:337px; top:22px; width:286px; height:40px;
+                   background-repeat:no-repeat; background-size:431px 609px; background-position:-72px 0; }
+
+.rst-roles { position:absolute; left:140px; top:96px; display:flex; gap:40px; }
+.rst-role  { position:relative; width:200px; height:240px; pointer-events:auto; cursor:pointer;
+             background:linear-gradient(#16304ecc,#0b1830cc); border:2px solid #4a7fc0aa; border-radius:10px;
+             box-shadow:inset 0 0 24px #0a1c34; transition:transform .2s, border-color .2s; }
+.rst-role[data-empty="true"] { border-style:dashed; }   /* 空档 = 昵称空（STI11），不是故障 */
+.rst-role:hover { transform:translateY(-4px); border-color:#8fd0ff; }
+.rst-role-effect { position:absolute; inset:0; display:none; border-radius:10px;
+                   background-repeat:no-repeat; background-position:center; background-size:contain;
+                   /* 上游：`Character` 容器实测 490×404（= Login Effect.png 原尺寸）⇒ 光柱铺满整格；
+                      三格中心 x = 0/±325、间隔 160（参考分辨率 1920×1080 ⇒ 本画布 960×540 下减半）。
+                      本格维持 200×240（与 STB-c 已手测通过的版面一致），图按 contain 居中。 */ }
+.rst-role[data-empty="false"] .rst-role-effect   { display:block; }
+.rst-role-portrait { position:absolute; inset:8px 8px 44px; display:grid; place-items:center;
+                     color:#5b7ba6; font-size:20px; letter-spacing:3px; border-radius:8px;
+                     background:repeating-linear-gradient(45deg,#0e1c30,#0e1c30 8px,#12243c 8px,#12243c 16px); }
+.rst-role[data-empty="false"] .rst-role-portrait { display:none; }   /* 满档：占位底纹让位给光柱（Login Effect） */
+/* 每格的"小赛尔"机器人（上游 Login.unity 的 `Seer Robot`：`Robot/7001.png`，96×149，中锚 y=−35）。
+   本画布 960×540 = 上游参考 1920×1080 的一半 ⇒ 48px × 74.5px、中心下移 17.5px。
+   ⚠️ 上游是"三格都挂"（`m_Enabled: 1`，与档空不空无关），但**人类 2026-10-18 拍板 = 与光柱一致、只满档显示**
+   （空档格继续只画虚线框 + 斜纹 + "空档"，不叠加装饰件）⇒ 选择器与 .rst-role-effect 同款。
+   想改回"三格都挂"：去掉 `.rst-role[data-empty="false"] ` 前缀即可（一行）。 */
+.rst-role-robot  { position:absolute; left:50%; top:50%; width:48px; height:74.5px; display:none;
+                   transform:translate(-50%, calc(-50% + 17.5px));
+                   background-repeat:no-repeat; background-position:center; background-size:contain;
+                   pointer-events:none; }
+.rst-role[data-empty="false"] .rst-role-robot { display:block; }
+.rst-role-name   { position:absolute; left:0; right:0; bottom:12px; text-align:center; color:#dbeaff; font-size:16px; }
+.rst-role-gender { position:absolute; right:8px; top:8px; width:18px; height:18px; background-repeat:no-repeat;
+                   /* 只取 男/女 图标本体：Male.png（156×84）/ Female.png（155×85）里，符号落在 (48,30) 起 40×40 的窗口内，
+                      窗口按 0.45 缩到 18×18 ⇒ size 70.2×37.8、position -21.6,-13.5（实测两图符号 bbox：男 55..78×33..63、女 50..68×38..64） */
+                   background-size:70.2px 37.8px; background-position:-21.6px -13.5px; }
+.rst-role.is-chosen { border-color:#8fd0ff; transform:scale(1.1); }   /* 上游 LoginRoleView.SetChosen(true) = localScale *= 1.1（设计 §3.2） */
+.rst-role-cover  { position:absolute; inset:0; display:none; place-items:center; border-radius:10px;
+                   background:#00000099; color:#fff; font-size:18px; letter-spacing:2px; }
+.rst-login.is-importing .rst-role-cover { display:grid; }
+.rst-login.is-importing .rst-role       { border-color:#ffd76a; }
+/* 建号态：底下的格与导入钮让位，避免点到后面 */
+.rst-login.is-creating .rst-roles, .rst-login.is-creating .rst-import, .rst-login.is-creating .rst-import-hint { pointer-events:none; }
+
+.rst-import-hint { position:absolute; left:0; right:0; top:358px; display:none; text-align:center;
+                   color:#ffd76a; font-size:15px; letter-spacing:1px; text-shadow:0 1px 3px #000b; }
+.rst-login.is-importing .rst-import-hint { display:block; }
+.rst-import { position:absolute; left:50%; top:392px; width:357px; height:79px; margin-left:-178.5px;
+              padding:0; border:0; background-color:transparent; background-repeat:no-repeat; background-size:100% 100%;
+              pointer-events:auto; cursor:pointer; transition:transform .28s cubic-bezier(.16,1,.3,1); }
+.rst-import:hover { transform:scale(1.04); }
+
+/* 建号面板（STQ7）。底图 Nickname Field.png 自带 "输入昵称" 与输入框框体：
+   底图 1202×663 → 画布 ×0.8 ⇒ 图里的输入框 (490..725, 463..503) 落在 (392..580, 370..402)。 */
+.rst-create      { position:absolute; inset:0; }
+.rst-create-bg   { position:absolute; inset:0; background-repeat:no-repeat; background-size:100% 100%; }
+.rst-create-input { position:absolute; left:392px; top:370px; width:188px; height:32px; padding:0 8px;
+                    background:#0b2a52; border:2px solid #7fb2e8; border-radius:4px; color:#eaf4ff; font-size:16px; }
+.rst-create-error { position:absolute; left:392px; top:344px; color:#ff9a9a; font-size:14px; text-shadow:0 1px 2px #000b; }
+/* 性别两钮落在底图自带的银色框体里（画布 x 364..604）：138×67 的内容缩到 114×55，两枚 + 12 间距居中。 */
+.rst-create-genders { position:absolute; left:360px; top:410px; display:flex; gap:12px; }
+.rst-create-gender  { width:114px; height:55px; padding:0; border:0; background-color:transparent; background-repeat:no-repeat;
+                      opacity:.62; filter:grayscale(.4); cursor:pointer; transition:opacity .2s, filter .2s, transform .2s; }
+.rst-create-gender.is-on { opacity:1; filter:none; transform:scale(1.04); }
+/* 建号面板里的真控件要收指针（宿主 #rv 放行，见 ui.css 顶部口径） */
+.rst-create-input, .rst-create-gender, .rst-create-ok, .rst-create-cancel { pointer-events:auto; }
+.rst-create-actions { position:absolute; left:50%; top:470px; transform:translateX(-50%); display:flex; gap:24px; }
+.rst-create-ok, .rst-create-cancel { width:96px; height:34px; padding:0; cursor:pointer;
+                      color:#eaf4ff; font-size:15px; letter-spacing:2px;
+                      background:linear-gradient(#2a5b96,#12294a); border:1px solid #7fb4e6; border-radius:6px; }
+.rst-create-ok:hover, .rst-create-cancel:hover { background:linear-gradient(#3a72b4,#1b3a66); }
+
+/* ---- C1·Dex 精灵图鉴面板 (rb-dex-*，2026-10-19；docs/view/panel/dex/) ----
+   版式 = 上游 760×480 **正居中**（左 100 / 上 30；不照搬上游 anchoredPosition(50,0) 的右偏，见 design DX2）。
+   坐标 = 960×540 逻辑像素；素材全吃盘上既有 Unity PNG（零新素材 = DXI6），缺图由 mountImg 自陈 asset-missing。 */
+#rv .rb-dex { position:absolute; left:100px; top:30px; width:760px; height:480px; pointer-events:auto; box-sizing:border-box;
+  background:#0e1626; border:1px solid #263450; border-radius:8px; display:flex; flex-direction:column;
+  color:#eaf2ff; font-size:12px; }
+#rv .rb-dex-head { display:flex; align-items:center; gap:8px; padding:6px 12px; border-bottom:1px solid #263450; }
+#rv .rb-dex-title { font-size:17px; font-weight:bold; }
+#rv .rb-dex-close { margin-left:auto; width:35px; height:35px; cursor:pointer; }
+#rv .rb-dex-close img { width:100%; height:100%; object-fit:contain; display:block; }
+/* 页签：底 = Unity 内置 UISprite 涂黑 + 青色描边字（盘上无专属 PNG，实测已核 ⇒ 不伪造第五张图） */
+#rv .rb-dex-tabs { display:flex; gap:10px; padding:6px 12px 0; }
+#rv .rb-dex-tab { width:120px; height:30px; display:flex; align-items:center; justify-content:center; cursor:pointer;
+  background:#000; border:1px solid #1c2740; border-radius:4px; font-size:14px; color:#cfe0ff;
+  text-shadow:2px -2px 0 rgb(82,230,250); }
+#rv .rb-dex-tab--on { border-color:#52e6fa; color:#fff; background:#0b2233; }
+#rv .rb-dex-filter { display:flex; align-items:center; gap:8px; padding:6px 12px; border-bottom:1px solid #263450; }
+#rv .rb-dex-flabel { color:#8fb0d8; }
+#rv .rb-dex-sort { width:96px; padding:3px 6px; background:#0a1120; color:#dce8ff; border:1px solid #2f4568; border-radius:5px; font-size:12px; }
+#rv .rb-dex-search { width:200px; padding:3px 8px; background:#0a1120; color:#dce8ff; border:1px solid #2f4568; border-radius:5px; font-size:12px; }
+#rv .rb-dex-search-btn { width:32px; height:24px; cursor:pointer; }
+#rv .rb-dex-search-btn img { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-dex-count { margin-left:auto; color:#8fb0d8; }
+#rv .rb-dex-body { flex:1 1 auto; display:flex; min-height:0; }
+/* 左：元素栏 100 宽（收起时只留那颗 toggler，元素谓词复位成"全部"） */
+#rv .rb-dex-element { flex:0 0 100px; width:100px; padding:4px; border-right:1px solid #263450; overflow:hidden;
+  background:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Panels/PetStorage/Sprites/element%20background.png") center/contain no-repeat; }
+#rv .rb-dex-element--closed { flex-basis:44px; width:44px; border-right:0; }
+#rv .rb-dex-element-toggle { width:36px; height:24px; cursor:pointer; }
+#rv .rb-dex-element-toggle img { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-dex-element-toggle--off { opacity:.5; }
+#rv .rb-dex-element-grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:2px; margin-top:4px; }
+#rv .rb-dex-element-btn { width:20px; height:20px; cursor:pointer; border:1px solid transparent; border-radius:3px; }
+#rv .rb-dex-element-btn img { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-dex-element-btn--on { border-color:#52e6fa; background:#0b2233; }
+#rv .rb-dex-element-page { display:flex; align-items:center; gap:4px; margin-top:4px; }
+#rv .rb-dex-element-pageno { font-size:10px; color:#9fb4d6; }
+/* 中：列表区 360×380（内层 330×340，9 格坐标见 view/dex/cells.js 的抄表） */
+#rv .rb-dex-mid { flex:0 0 360px; width:360px; display:flex; flex-direction:column; padding:6px 8px; }
+#rv .rb-dex-list { position:relative; width:330px; height:340px; }
+#rv .rb-dex-cell { position:absolute; box-sizing:border-box; cursor:pointer;
+  background-color:#0a1120; background-image:url("/projects/Seer2-Restart-Lite-main/Assets/Resources/Panels/OldPetBag/Sprites/85.png");
+  background-size:100% 100%; background-repeat:no-repeat; }
+/* 选中态 = 换框（87.png，design DX5 第 3 条）⇒ `.rb-dex-cell--on` 只做状态标记，图由 JS 换 */
+#rv .rb-dex-cell-icon { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-dex-cell img.rb-dex-cell-icon { position:absolute; inset:10px; }   /* 内层 -10×-10（prefab 实测 = 四边各缩 10） */
+#rv .rb-dex-cell-no { position:absolute; left:0; right:0; bottom:1px; text-align:center; font-size:10px;
+  color:#cfe0ff; text-shadow:0 1px 2px #000; pointer-events:none; }
+#rv .rb-dex-cell-have { position:absolute; left:-10px; top:5px; pointer-events:none; }
+#rv .rb-dex-cell-have img { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-dex-pager { display:flex; align-items:center; gap:8px; padding-top:6px; }
+#rv .rb-dex-pagebtn { cursor:pointer; padding:2px 10px; background:#243049; border:1px solid #2f4568; border-radius:5px; color:#cfe0ff; }
+#rv .rb-dex-pagebtn--off { opacity:.4; cursor:default; }
+#rv .rb-dex-page { font-size:12px; color:#9fb4d6; }
+#rv .rb-dex-jump { width:48px; padding:2px 4px; background:#0a1120; color:#dce8ff; border:1px solid #2f4568; border-radius:5px; font-size:12px; }
+#rv .rb-dex-jumpbtn { cursor:pointer; padding:2px 8px; background:#243049; border:1px solid #2f4568; border-radius:5px; }
+/* 右：信息区 + 展示台（常驻壳，换宠只换素材 —— Ruffle 播放器一脱离 DOM 即销毁） */
+#rv .rb-dex-side { flex:1 1 auto; display:flex; flex-direction:column; gap:6px; padding:6px 8px; min-width:0; overflow:hidden; }
+#rv .rb-dex-info { flex:0 0 auto; display:flex; flex-direction:column; gap:2px; }
+#rv .rb-dex-row { display:flex; gap:6px; align-items:flex-start; }
+#rv .rb-dex-row-label { flex:0 0 46px; color:#8fb0d8; }
+#rv .rb-dex-row-value { flex:1 1 auto; min-width:0; }
+#rv .rb-dex-row-text { word-break:break-all; }
+#rv .rb-dex-dash { color:#5d6b85; }
+#rv .rb-dex-d-name { display:flex; align-items:center; gap:4px; font-size:14px; font-weight:bold; }
+#rv .rb-dex-d-elem { width:16px; height:16px; }
+#rv .rb-dex-d-elem img { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-dex-d-have { font-size:10px; color:#52e6fa; font-weight:normal; }
+#rv .rb-dex-desc { line-height:1.35; max-height:56px; overflow-y:auto; }
+#rv .rb-dex-go { width:26px; height:26px; cursor:pointer; }
+#rv .rb-dex-go img { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-dex-status { display:flex; gap:2px; }
+#rv .rb-dex-status-cell { flex:1 1 0; text-align:center; background:#15233c; border:1px solid #2f4568; border-radius:4px; padding:2px 0; }
+#rv .rb-dex-status-label { font-size:10px; color:#8fb0d8; }
+#rv .rb-dex-status-value { font-size:13px; }
+#rv .rb-dex-acts { display:flex; gap:6px; }
+#rv .rb-dex-cry, #rv .rb-dex-test { width:26px; height:26px; cursor:pointer; }
+#rv .rb-dex-cry img, #rv .rb-dex-test img { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-dex-stage { position:relative; flex:1 1 auto; min-height:0; border:1px dashed #2b3242; border-radius:6px;
+  background:rgba(0,0,0,.25); overflow:hidden; display:flex; align-items:center; justify-content:center; }
+#rv .rb-dex-stage img { max-width:80%; max-height:92%; object-fit:contain; -webkit-user-drag:none; }
+#rv .rb-dex-stage ruffle-player { width:100%; height:100%; display:block; }
+#rv .rb-dex-tip { position:absolute; display:none; pointer-events:none; padding:3px 8px; background:#000;
+  border:1px solid #fff; border-radius:4px; font-size:12px; color:#fff; white-space:nowrap; }
+
+/* ── C3·SPT Boss 面板（view/spt · 线稿复刻 spt-design SP1–SP3；盒 800×500 水平居中，竖排 head|map|info）── */
+#rv .rb-spt-box { position:absolute; left:80px; top:calc((var(--rv-h, 540px) - 500px) / 2); width:800px; height:500px;
+  pointer-events:auto; box-sizing:border-box; background:#0e1626; border:1px solid #263450; border-radius:8px;
+  display:flex; flex-direction:column; color:#eaf2ff; overflow:hidden; }
+#rv .rb-spt-boxbg { position:absolute; left:0; top:0; width:100%; height:100%; object-fit:fill; opacity:.5; z-index:0; }
+#rv .rb-spt-head { position:relative; z-index:1; display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid #263450; }
+#rv .rb-spt-title { font-size:17px; font-weight:bold; }
+#rv .rb-spt-tab { cursor:pointer; padding:3px 10px; background:#243049; border:1px solid #2f4568; border-radius:5px; font-size:13px; color:#cfe0ff; }
+#rv .rb-spt-tab.rb-spt-on { background:#3a5a8c; color:#fff; }
+#rv .rb-spt-spacer { flex:1; }
+#rv .rb-spt-nav { cursor:pointer; padding:3px 10px; background:#243049; border:1px solid #2f4568; border-radius:5px; font-size:13px; color:#cfe0ff; }
+#rv .rb-spt-map { position:relative; z-index:1; flex:1; min-height:0; overflow:hidden; }
+#rv .rb-spt-bg { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); }
+#rv .rb-spt-bg img { display:block; }
+#rv .rb-spt-boss { position:absolute; display:flex; align-items:center; justify-content:center; cursor:pointer;
+  border:1px solid transparent; border-radius:6px; }
+#rv .rb-spt-boss:hover { border-color:#6ea0e0; background:rgba(110,160,224,.12); }
+#rv .rb-spt-boss img { max-width:88%; max-height:80%; object-fit:contain; display:block; -webkit-user-drag:none; }
+#rv .rb-spt-boss[data-asset-missing] { border:1px dashed #5d6b85; background:#15233c; }
+#rv .rb-spt-bname { position:absolute; left:0; right:0; bottom:2px; text-align:center; font-size:11px; color:#cfe0ff;
+  text-shadow:0 1px 2px #000; pointer-events:none; }
+#rv .rb-spt-tip { position:absolute; display:none; z-index:2; pointer-events:none; padding:3px 8px; background:#000;
+  border:1px solid #fff; border-radius:4px; font-size:12px; color:#fff; white-space:nowrap; }
+
+/* ---- C5·灵兽/精灵王面板 (rb-godpet-*，2026-10-19；docs/view/panel/godpet/) ----
+   几何 = 上游 Panels/SpriteKing/Panel.prefab 逐条换算（Unity 中心系 ⇒ CSS = 480+cx-w/2, 270-cy-h/2）：
+   Light Panel 400×400@(-220,0)→(60,70)；Challenge 400×200@(240,100)→(220,70)，四钮 160×50；
+   Get King/Rule 165×65 贴底 y15→top 460；Help Panel 350×180@(240,-120)→(545,300)。
+   青边盒/钮底 = CSS 染色近似（上游用内建白图，无边框 PNG；与 rb-act/rb-spt 同口径）。 */
+#rv .rb-godpet-box { position:absolute; left:0; top:calc((var(--rv-h, 540px) - 540px) / 2); width:960px; height:540px;
+  pointer-events:auto; background:#0e1626; border:1px solid #263450; border-radius:8px; overflow:hidden;
+  color:#eaf2ff; font-family:"Noto Sans CJK SC",system-ui,sans-serif; }
+#rv .rb-godpet-bg { position:absolute; left:0; top:0; width:100%; height:100%; object-fit:fill; opacity:.55; z-index:0; }
+#rv .rb-godpet-close { position:absolute; right:14px; top:10px; z-index:3; cursor:pointer; color:#fff;
+  padding:2px 8px; background:#5a2a2a; border-radius:5px; font-size:14px; }
+#rv .rb-godpet-light { position:absolute; left:60px; top:70px; width:400px; height:400px; z-index:1; }
+#rv .rb-godpet-cell { position:absolute; width:100px; height:100px; border:2px solid #263450; border-radius:8px;
+  background:rgba(6,10,20,.62); display:flex; align-items:center; justify-content:center; }
+#rv .rb-godpet-cell--on { border-color:#52e0ff; box-shadow:0 0 10px rgba(82,224,255,.35); }
+#rv .rb-godpet-cell img { max-width:88%; max-height:88%; object-fit:contain; display:block; -webkit-user-drag:none; }
+#rv .rb-godpet-cell[data-asset-missing] { border-style:dashed; }
+#rv .rb-godpet-chal { position:absolute; left:220px; top:70px; width:400px; height:200px; z-index:1; }
+#rv .rb-godpet-foot { position:absolute; left:0; right:0; bottom:15px; height:65px; z-index:1; }
+#rv .rb-godpet-btn { position:absolute; width:160px; height:50px; cursor:pointer; display:flex; align-items:center;
+  justify-content:center; font-size:15px; color:#eaf2ff; background:#243049; border:1px solid #2f4568; border-radius:6px; }
+#rv .rb-godpet-btn:hover { border-color:#6ea0e0; background:#2f4568; }
+#rv .rb-godpet-chal .rb-godpet-btn { width:160px; }
+#rv .rb-godpet-foot .rb-godpet-btn { top:0; height:65px; }
+#rv .rb-godpet-foot .rb-godpet-btn:first-child { left:210px; width:165px; }
+#rv .rb-godpet-foot .rb-godpet-btn:last-child { left:540px; width:165px; }
+#rv .rb-godpet-btn--king { background:#2f6db0; border-color:#6ea0e0; }
+#rv .rb-godpet-btn--done { opacity:.55; }
+#rv .rb-godpet-help { position:absolute; left:545px; top:300px; width:350px; height:180px; z-index:2; display:none;
+  padding:10px 12px; font-size:12px; line-height:1.55; overflow:auto; background:rgba(10,16,30,.94);
+  border:1px solid #2f4568; border-radius:6px; }
+
+/* ---- C3·疑难指引面板 (rb-guide-*，2026-10-20；docs/view/panel/guide/) ----
+   几何 = 上游 Panels/GuideLine/Panel.prefab 逐条换算（960×540 左上原点）：
+   窗 570×400@(195,70)；标题线 y90；页签 100×30@y130（x=250/370/490/610）；Module y170 高 300；
+   属性格 40×40@x=208+44c,y=200+44r；三关系区 [435/565/695,220,120/120/50,190]；脚注 y420；
+   性格视口 510×230@(227,220)。关系区改成区内滚动（上游 12 槽会吞掉精灵王的 10/9 项，见 design GD7）。
+   青边盒/暗底 = CSS 近似上游内置黑图（无窗背景素材；与 rb-dex/rb-spt 同口径）。 */
+#rv .rb-guide-box { position:absolute; left:195px; top:calc((var(--rv-h, 540px) - 540px) / 2 + 70px);
+  width:570px; height:400px; pointer-events:auto; overflow:hidden; color:#eaf2ff;
+  background:linear-gradient(180deg, #0d1728 0%, #0a1220 100%);
+  border:1px solid #2f4568; border-radius:6px; box-shadow:0 6px 24px rgba(0,0,0,.55); }
+#rv .rb-guide-titleline { position:absolute; left:0; top:20px; width:570px; height:23px; object-fit:fill;
+  opacity:.9; pointer-events:none; }
+#rv .rb-guide-title { position:absolute; left:0; top:0; width:570px; height:50px; display:flex;
+  align-items:center; justify-content:center; font-size:24px; font-weight:bold; color:#52e5f9;
+  letter-spacing:2px; text-shadow:0 0 6px rgba(82,229,249,.35); pointer-events:none; }
+#rv .rb-guide-close { position:absolute; left:530px; top:5px; width:35px; height:35px; cursor:pointer; z-index:2; }
+#rv .rb-guide-close img { width:100%; height:100%; object-fit:contain; display:block; }
+#rv .rb-guide-close[data-asset-missing] { border:1px dashed #5d6b85; border-radius:5px; }
+
+#rv .rb-guide-tabs { position:absolute; left:55px; top:60px; width:460px; height:30px; }
+#rv .rb-guide-tab { position:absolute; top:0; width:100px; height:30px; display:flex; align-items:center;
+  justify-content:center; font-size:18px; color:#9fb8cf; cursor:pointer; z-index:1; user-select:none; }
+#rv .rb-guide-tab:hover { color:#d8ecff; }
+#rv .rb-guide-tab[data-on="1"] { color:#fff; }
+#rv .rb-guide-cursor { position:absolute; left:120px; top:-1px; width:100px; height:32px; z-index:0;
+  transition:left .12s ease-out; pointer-events:none; }
+#rv .rb-guide-cursor img { width:100%; height:100%; object-fit:fill; display:block; }
+#rv .rb-guide-cursor[data-asset-missing] { border:1px dashed #5d6b85; border-radius:5px; }
+
+#rv .rb-guide-body { position:absolute; left:0; top:100px; width:570px; height:300px; }
+#rv .rb-guide-page { position:absolute; inset:0; display:none; }
+#rv .rb-guide-page[data-on="1"] { display:block; }
+
+/* 属性攻击 / 防守：23 格（5×4+3） */
+#rv .rb-guide-grid { position:absolute; left:5px; top:30px; width:220px; height:220px; }
+#rv .rb-guide-cell { position:absolute; width:40px; height:40px; display:flex; align-items:center;
+  justify-content:center; cursor:pointer; border:1px solid transparent; border-radius:5px;
+  background:rgba(6,10,20,.45); }
+#rv .rb-guide-cell:hover { border-color:#6ea0e0; }
+#rv .rb-guide-cell[data-on="1"] { border-color:#52e5f9; background:rgba(82,229,249,.12);
+  box-shadow:0 0 8px rgba(82,229,249,.45); }
+#rv .rb-guide-cell img { width:30px; height:30px; object-fit:contain; display:block; -webkit-user-drag:none; }
+#rv .rb-guide-cell[data-asset-missing] { border-style:dashed; }
+
+#rv .rb-guide-elemhead { position:absolute; left:240px; top:10px; width:320px; height:40px; display:flex;
+  align-items:center; gap:6px; pointer-events:none; }
+#rv .rb-guide-elemicon { width:40px; height:40px; flex:0 0 40px; display:flex; align-items:center; justify-content:center; }
+#rv .rb-guide-elemicon img { width:40px; height:40px; object-fit:contain; display:block; }
+#rv .rb-guide-elemicon[data-asset-missing] { border:1px dashed #5d6b85; border-radius:5px; }
+#rv .rb-guide-elemname { font-size:16px; color:#52e5f9; }
+
+#rv .rb-guide-sec { position:absolute; top:50px; height:190px; }
+#rv .rb-guide-sech { height:24px; display:flex; align-items:baseline; gap:5px; font-size:16px; color:#52e5f9; }
+#rv .rb-guide-sech-count { font-size:12px; color:#8fb8d8; }
+#rv .rb-guide-slots { height:166px; overflow-y:auto; overflow-x:hidden; display:grid;
+  grid-template-columns:repeat(3, 36px); grid-auto-rows:38px; gap:2px; align-content:start; padding-right:2px; }
+#rv .rb-guide-sec--zero .rb-guide-slots { grid-template-columns:36px; }
+#rv .rb-guide-ebtn { width:36px; height:36px; display:flex; align-items:center; justify-content:center;
+  background:rgba(6,10,20,.45); border:1px solid #263450; border-radius:4px; cursor:help; }
+#rv .rb-guide-ebtn:hover { border-color:#6ea0e0; }
+#rv .rb-guide-ebtn img { width:30px; height:30px; object-fit:contain; display:block; -webkit-user-drag:none; }
+#rv .rb-guide-ebtn[data-asset-missing] { border-style:dashed; }
+#rv .rb-guide-empty { grid-column:1 / -1; color:#5d6b85; font-size:16px; padding-top:4px; }
+#rv .rb-guide-slots::-webkit-scrollbar,
+#rv .rb-guide-plist::-webkit-scrollbar { width:4px; }
+#rv .rb-guide-slots::-webkit-scrollbar-thumb,
+#rv .rb-guide-plist::-webkit-scrollbar-thumb { background:#3b7f9e; border-radius:2px; }
+#rv .rb-guide-slots::-webkit-scrollbar-track,
+#rv .rb-guide-plist::-webkit-scrollbar-track { background:transparent; }
+
+#rv .rb-guide-note { position:absolute; left:0; top:250px; width:570px; height:50px; display:flex;
+  align-items:center; justify-content:center; font-size:18px; color:#dfe9f5; pointer-events:none; }
+#rv .rb-guide-red { color:#ff5a5a; }
+
+/* 性格查询：55 行列表 + 固定表头 + 底部说明（发行版唯一激活块 = List） */
+#rv .rb-guide-phead, #rv .rb-guide-prow { display:flex; align-items:center; width:510px; }
+#rv .rb-guide-phead { position:absolute; left:32px; top:10px; height:26px; font-size:14px; color:#52e5f9;
+  border-bottom:1px solid #263450; }
+#rv .rb-guide-plist { position:absolute; left:32px; top:42px; width:510px; height:222px; overflow-y:auto;
+  overflow-x:hidden; }
+#rv .rb-guide-prow { height:35px; cursor:pointer; font-size:13px; color:#cfe0ff;
+  border-bottom:1px solid rgba(38,52,80,.5); }
+#rv .rb-guide-prow:hover { background:rgba(110,160,224,.10); }
+#rv .rb-guide-prow[data-on="1"] { background:rgba(82,229,249,.14); }
+#rv .rb-guide-pname { flex:0 0 100px; box-sizing:border-box; padding-left:8px; color:#52e5f9; white-space:nowrap; overflow:hidden; }
+#rv .rb-guide-pcell { flex:0 0 82px; text-align:center; }
+#rv .rb-guide-pcell[data-tone="up"] { color:#7dff9a; }
+#rv .rb-guide-pcell[data-tone="down"] { color:#ff7b7b; }
+#rv .rb-guide-pcell[data-tone="flat"] { color:#7d8ba3; }
+#rv .rb-guide-pdesc { position:absolute; left:32px; top:268px; width:510px; height:26px; display:flex;
+  align-items:center; padding-left:8px; box-sizing:border-box; font-size:13px; color:#9fc6e8;
+  background:rgba(6,10,20,.35); border-radius:4px; pointer-events:none; }

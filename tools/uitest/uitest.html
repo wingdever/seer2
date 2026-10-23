@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>uitest · Ruffle 能否按类名实例化 UI.swf 的符号</title>
+<body style="background:#111;color:#8fa;font:13px ui-monospace,monospace">
+<pre id="r">running…</pre>
+<script src="/ruffle/ruffle.js"></script>
+<script>
+window.uiTestReady = () => {}
+window.onload = async () => {
+  const p = window.RufflePlayer.newest().createPlayer()
+  p.style.width = '1200px'; p.style.height = '660px'
+  document.body.appendChild(p)
+  await p.ruffle().load({
+    url: '/tools/uitest/uiTest.swf',
+    renderer: 'canvas', allowScriptAccess: true, autoplay: 'on',
+    scale: 'noScale', warnOnUnsupportedContent: false,
+  }).catch(e => { document.getElementById('r').textContent = 'load failed ' + e })
+}
+</script>

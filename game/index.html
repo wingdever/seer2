@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>约瑟传说 · 网页复刻</title>
+<link rel="icon" href="data:,">
+<style>
+  /* 游戏屏幕上下 + 左右居中（#fab/#ctrlPanel 是 fixed，不影响 flex 居中） */
+  body { margin:0; min-height:100vh; display:flex; background:#14161c; color:#cfd3dd; font:14px/1.5 system-ui,sans-serif; }
+  .ctrlTitle { font-size:16px; font-weight:600; margin-bottom:4px; }
+  #hint { color:#8b93a7; margin:2px 0 6px; white-space:pre-wrap; }
+  /* 悬浮球 + 控制面板（替代原 #bar 的外部控制按钮区）: 点击悬浮球开/合, 默认隐藏面板 */
+  #fab { position:fixed; right:20px; bottom:20px; width:52px; height:52px; border-radius:50%; z-index:200;
+         background:#2b3344; color:#cfd3dd; border:1px solid #46506b; font-size:22px; line-height:1; cursor:pointer;
+         display:flex; align-items:center; justify-content:center; box-shadow:0 3px 12px rgba(0,0,0,.55); }
+  #fab:hover { background:#364056; }
+  #ctrlPanel { position:fixed; right:20px; bottom:84px; z-index:190; display:flex; flex-direction:column; align-items:flex-start;
+               gap:6px; max-width:min(92vw,760px); background:#1b1f2ae6; border:1px solid #46506b;
+               border-radius:10px; padding:10px 12px; backdrop-filter:blur(2px); box-shadow:0 4px 16px rgba(0,0,0,.55); }
+  #ctrlButtons { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  #ctrlPanel[hidden] { display:none; }
+  /* 原始舞台 root = 1200x660 (ArenaUIController stageWidth/1200 stageHeight/660; 地图SWF舞台实测)
+     #wrap 是舞台唯一容器, 场景挂载时填自己的图层、卸载时清空 (ruffle-player 脱离 DOM 即 destroy) */
+  /* 游戏屏幕居中显示（替代原左侧贴边的 #wrap） */
+  #wrap { position:relative; width:1200px; height:660px; margin:auto; overflow:hidden; background:#000; }
+  #wrap ruffle-player { width:100%; height:100%; display:block; }
+  /* 传送点"光口" = 重启导出件 teleport.png (就是原版 UI_hud.swf 里的符号 UI_Teleport 的高清导出:
+     白径向光, 80x62, 轮廓包围盒 x∈[-39.65,40.35] y∈[-40.65,21.35])。
+     压在 SWF 内容层之上、调试叠加(#ov)之下; 命中判定在 mapScene.js 里按同一矩形算, 故 pointer-events:none。 */
+  #portal { position:absolute; inset:0; width:1200px; height:660px; pointer-events:none; z-index:1; }
+  /* 悬浮说明 = 重启 InfoPrompt 的第一个 DOM 切片 (Prefabs/Info Prompt.prefab: 黑底 a=1, 白字 14px 居中,
+     盒高 = 文本高 + 21; 贴光标右侧, pivot 左下 ⇒ 盒底边在光标上方 2px)。原版对应 TooltipManager/CommonTipSkin。
+     z=70 压过面板宿主 #rv(z=60): 重启的 InfoPrompt.SetActive 会 SetAsLastSibling, 就是浮在最上。 */
+  #prompt { position:absolute; display:none; z-index:70; pointer-events:none; background:#000; color:#fff;
+            text-align:center; padding:10px 8px; font:14px/1.2 system-ui,sans-serif; white-space:pre; }
+  #ov { position:absolute; inset:0; width:1200px; height:660px; pointer-events:none; z-index:2; }
+  /* ★MDB11：`#lbl`（合成野怪的 `Lv+名字` 脚标层）随 `wild.json` 断粮**整条拆除** ⇒ z 序留空洞，不重排（`#hudtxt` 仍 z=4） */
+  #hudtxt { position:absolute; inset:0; width:1200px; height:660px; pointer-events:none; z-index:4; }
+  /* 背包格子的悬浮说明: 原版是 core/ui/toolTip 里的 TCMText 富文本气泡 (字体子集没有中文, 同 HUD 的处置) */
+  #bagtip { position:absolute; display:none; max-width:240px; padding:6px 8px; z-index:6; pointer-events:none;
+            background:rgba(14,18,26,.96); border:1px solid #4a5b76; border-radius:4px;
+            color:#e8ecf4; font:12px/1.5 system-ui,sans-serif; box-shadow:0 2px 10px rgba(0,0,0,.6); }
+  #bagtip b { color:#ffe066; font-size:13px; display:block; margin-bottom:2px; }
+  #bagtip i { color:#8b98ad; font-style:normal; display:block; margin-top:4px; }
+  button { background:#262b38; color:#cfd3dd; border:1px solid #3a4156; border-radius:6px; padding:4px 10px; cursor:pointer; }
+  button.on { background:#3d6844; border-color:#5a9b64; }
+  select { background:#1d212b; color:#eee; border:1px solid #3a4156; border-radius:4px; padding:2px 6px; max-width:320px; }
+  input[type=number] { width:64px; background:#1d212b; color:#eee; border:1px solid #3a4156; border-radius:4px; padding:2px 6px; }
+  label { color:#8b93a7; }
+  #hint { color:#8b93a7; margin-left:8px; }
+  /* 重启面板线（UI 线）的样板入口条，见 docs/view/ui-handoff.md §7 U0 */
+  #rvbar { margin:0 0 8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  #rvbar .note { color:#8b93a7; font-size:12px; }
+  /* 战斗图层: 地图底 + 左右 fight 容器 + 原版战斗 UI */
+  #bg { position:absolute; left:0; top:0; width:1200px; height:660px; pointer-events:none; }
+  #bg ruffle-player { width:100%; height:100%; display:block; }
+  .fighter { position:absolute; left:0; top:0; width:1200px; height:660px; pointer-events:none; }
+  .fighter ruffle-player { width:100%; height:100%; display:block; }
+  #ui { position:absolute; left:0; top:0; width:1200px; height:660px; z-index:10; }
+  #ui ruffle-player { width:100%; height:100%; display:block; }
+  /* hub 子面板 (道具/胶囊/换宠列表) + 战后结算浮层: DOM 层, 中文不受 SWF 字体子集限制 */
+  #panel { display:none; position:absolute; left:20px; bottom:16px; z-index:30; min-width:320px; max-width:560px;
+           background:#1b1f2acc; border:1px solid #46506b; border-radius:10px; padding:10px 12px; backdrop-filter:blur(2px); }
+  #panel h3 { margin:0 0 8px; font-size:14px; color:#e8d48a; }
+  #panel .row { display:flex; gap:8px; flex-wrap:wrap; }
+  #panel button { padding:6px 12px; }
+  #panel button[disabled] { opacity:.45; cursor:not-allowed; }
+  #settle { display:none; position:absolute; left:50%; top:120px; transform:translateX(-50%); z-index:40;
+            min-width:360px; background:#10131bf2; border:1px solid #5a9b64; border-radius:12px; padding:14px 18px; }
+  #settle h3 { margin:0 0 8px; font-size:15px; color:#7fd08a; }
+  #settle li { margin:3px 0; }
+  /* 技能读数条 = 内容宇宙的证据: 威力/命中/怒气直接取重启 Skills 表 (10001 拍打 命中 95, 官方是 100)。
+     fightUI 的 SWF 卡面没有中文也放不下命中, 所以这一条走 DOM —— 也是 S6 HUD 的前身。
+     摆位: 抬到 fightUI 卡列(舞台底部约 70px 高)之上, 右侧留出圆形按钮列, 否则互相压字。 */
+  #cards { position:absolute; left:12px; bottom:76px; max-width:840px; z-index:20; display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  #cards button { font:12px/1.3 system-ui,sans-serif; text-align:left; background:#10141cd9; }
+  #cards button b { color:#ffe066; font-weight:600 }
+  #cards button i { color:#8b93a7; font-style:normal }
+  #cards .src { color:#9aa7bd; font:11px/1.4 system-ui,sans-serif; background:#10141cb3; padding:1px 5px; border-radius:4px }
+</style>
+<script src="/ruffle/ruffle.js"></script>
+<!-- 存档线（Save）的读侧用 fast-xml-parser —— 纯 ESM 裸依赖，浏览器必须靠 import map 映**整个裸依赖闭包**
+     （少一项就是 ESM 链接期抛错 ⇒ main.js 不执行 ⇒ 停在「载入中…」黑屏，见 docs/arch-code.md §7.1）。
+     清单与实测来源：docs/save/save-impl.md §9.3 (4) 偏差②（7 项闭包 / 8 条 URL 全 200）。
+     ⚠️ 它必须出现在**第一个 module script 之前**（main.js 在 body 末尾 ⇒ 放这里够早）。 -->
+<script type="importmap">
+{
+  "imports": {
+    "fast-xml-parser": "/node_modules/fast-xml-parser/src/fxp.js",
+    "fast-xml-builder": "/node_modules/fast-xml-builder/src/fxb.js",
+    "strnum": "/node_modules/strnum/strnum.js",
+    "anynum": "/node_modules/anynum/anynum.js",
+    "@nodable/entities": "/node_modules/@nodable/entities/src/index.js",
+    "xml-naming": "/node_modules/xml-naming/src/index.js",
+    "path-expression-matcher": "/node_modules/path-expression-matcher/src/index.js",
+    "is-unsafe": "/node_modules/is-unsafe/src/index.js"
+  }
+}
+</script>
+<link rel="stylesheet" href="/game/app/ui.css">
+</head>
+<body>
+<div id="wrap"></div>
+<button id="fab" title="控制面板">⚙</button>
+<div id="ctrlPanel" hidden>
+  <div class="ctrlTitle">约瑟传说 · 网页复刻</div>
+  <div id="hint">载入中…</div>
+  <div id="rvbar">
+    <button id="rvDemo">重启战斗 · U1 面板</button>
+    <span class="note">UI 线（重启 IA）：#/rbattle 手写 DOM 战斗 HUD，数字只读 game/core/** — docs/view/ui-handoff.md</span>
+  </div>
+  <div id="ctrlButtons"></div>
+</div>
+<script>
+  // 悬浮球 ↔ 控制面板：默认面板隐藏，点击球体切换
+  document.getElementById('fab').addEventListener('click', function () {
+    var p = document.getElementById('ctrlPanel')
+    p.hidden = !p.hidden
+  })
+</script>
+<script type="module" src="/game/app/main.js"></script>
+</body>
+</html>

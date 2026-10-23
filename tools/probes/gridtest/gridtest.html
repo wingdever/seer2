@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>BitmapData.draw 能力探针</title>
+<script src="/ruffle/ruffle.js"></script>
+<body><div id="out" style="font:13px ui-monospace,monospace;white-space:pre-wrap;color:#cfd3dd;background:#14161c;padding:12px"></div>
+<script>
+const q = new URLSearchParams(location.search)
+const renderer = q.get('renderer') || 'canvas'
+const lines = []
+const put = s => { lines.push(s); document.getElementById('out').textContent = renderer + '\n' + lines.join('\n') }
+addEventListener('message', e => { if (e.data?.type?.startsWith('gt')) put(e.data.msg ?? JSON.stringify(e.data)) })
+const p = window.RufflePlayer.newest().createPlayer()
+document.body.appendChild(p)
+p.style.cssText = 'position:fixed;left:-9999px;width:400px;height:300px'
+window.__gt = lines
+window.__player = p
+p.ruffle().load({ url: '/tools/probes/gridtest/packProbe.swf?packUrl=' + encodeURIComponent(q.get('packUrl') || '/game/data/actor/UI_BLUE_BODY.bin'),
+  renderer, autoplay: 'on', unmuteOverlay: 'hidden', allowScriptAccess: true }).catch(e => put('load failed ' + e))
+</script>

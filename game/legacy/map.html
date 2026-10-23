@@ -1,0 +1,536 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>约瑟传说 · 地图 SWF 交互 (可走 / 寻路 / 镜头)</title>
+<style>
+  body { margin:0; background:#14161c; color:#cfd3dd; font:14px/1.5 system-ui,sans-serif; }
+  h1 { font-size:16px; margin:14px 18px 6px; }
+  #bar { margin:6px 18px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  #wrap { position:relative; width:1200px; height:660px; margin:8px 18px; overflow:hidden; background:#000; }
+  #wrap ruffle-player { width:100%; height:100%; display:block; }
+  #ov { position:absolute; inset:0; width:1200px; height:660px; pointer-events:none; z-index:2; }
+  #lbl { position:absolute; inset:0; width:1200px; height:660px; pointer-events:none; z-index:3; }
+  #hudtxt { position:absolute; inset:0; width:1200px; height:660px; pointer-events:none; z-index:4; }
+  /* 背包格子的悬浮说明: 原版是 core/ui/toolTip 里的 TCMText 富文本气泡 (字体子集没有中文, 同 HUD 的处置) */
+  #bagtip { position:absolute; display:none; max-width:240px; padding:6px 8px; z-index:6; pointer-events:none;
+            background:rgba(14,18,26,.96); border:1px solid #4a5b76; border-radius:4px;
+            color:#e8ecf4; font:12px/1.5 system-ui,sans-serif; box-shadow:0 2px 10px rgba(0,0,0,.6); }
+  #bagtip b { color:#ffe066; font-size:13px; display:block; margin-bottom:2px; }
+  #bagtip i { color:#8b98ad; font-style:normal; display:block; margin-top:4px; }
+  #log { margin:2px 18px; height:120px; overflow:auto; background:#0d0f14; border:1px solid #2a2f3d; border-radius:6px; padding:6px 8px; color:#7fd08a; font:12px/1.4 ui-monospace,monospace; white-space:pre-wrap; }
+  button { background:#262b38; color:#cfd3dd; border:1px solid #3a4156; border-radius:6px; padding:4px 10px; cursor:pointer; }
+  button.on { background:#3d6844; border-color:#5a9b64; }
+  select { background:#1d212b; color:#eee; border:1px solid #3a4156; border-radius:4px; padding:2px 6px; max-width:320px; }
+  label { color:#8b93a7; }
+  #hint { color:#8b93a7; margin-left:8px; }
+</style>
+<script src="/ruffle/ruffle.js"></script>
+</head>
+<body>
+<h1>地图 SWF 交互 <span id="hint">加载中的…</span></h1>
+<div id="bar">
+  <label>地图 <select id="mapSel"></select></label>
+  <label>角色 <select id="avSel"></select></label>
+  <button id="reloadBtn">重载</button>
+  <button id="backBtn" disabled>↩ 返回上一图</button>
+  <button id="gridBtn">显示可走栅格</button>
+  <button id="walkBtn">走向测试点</button>
+  <button id="statusBtn">状态</button>
+  <span id="stat" style="color:#8b93a7"></span>
+</div>
+<pre id="log"></pre>
+<div id="wrap"><canvas id="ov" width="1200" height="660"></canvas><canvas id="lbl" width="1200" height="660"></canvas><canvas id="hudtxt" width="1200" height="660"></canvas><div id="bagtip"></div></div>
+<script>
+// 表现 = 原版地图 SWF 的固定图层 (far_mc/ground_mc/content_mc/front_mc/path_mc/size_mc)
+// 规则 = MapAssetExtractor(path_mc 栅格: 10px/格, 填充=阻挡, 透明=可走)
+//        + PathScene(ground_mc 点击行走) + AStar(8 邻域, 禁穿角)
+// 栅格主路径 = MapRunner.as 内逐行照搬的原版 extractPath() (BitmapData.draw)
+// 旁路校验 = 宿主侧直接解析 SWF 矢量记录 (game/swfshape.mjs), 回灌 setWalkGrid 只报差异
+// 世界连通 = config XML 的 <teleport pos targetMapId>: 点它 → 寻路走过去 → 抵达后 loadWorld 换图,
+//            角色落在目标图的 <initialPoint> (单向图用「返回上一图」栈兜底)
+// 容器 = game/maprunner/mapRunner.swf (AS3, tools/build-maprunner.sh)
+// 裸装小赛尔部件包 (game/data/actor/) 的性别色: BLUE=男 / RED=女
+const COLORS = { BLUE: '小赛尔·蓝', RED: '小赛尔·红' }
+document.getElementById('avSel').innerHTML = Object.entries(COLORS).map(([v, k]) => `<option value="${v}">${k}</option>`).join('')
+
+const logEl = document.getElementById('log')
+function logLine(s) { logEl.textContent = s + '\n' + logEl.textContent.split('\n').slice(0, 40).join('\n') }
+
+const M = { player: null, info: null, grid: null, cam: { x: 0, y: 0 }, pos: null, mapUrl: '', map: null, spots: [], hist: [], wild: null, pets: [], hudTexts: [] }
+let byId = new Map()
+const nameOf = id => (byId.get(id) || {}).name || ('图' + id)
+const labelOf = id => (((byId.get(id) || {}).swfOk === false ? '⚠' : '') + nameOf(id)).replace(/[|;]/g, '')
+// MapRunner 的出口记录 = "x|y|targetMapId|目标名", 用 ';' 分隔 (XML 里 pos 是 "x,y")
+const spotsOf = m => (m.teleports || []).map(t => {
+  const xy = /^(-?[\d.]+)[,\s]+(-?[\d.]+)$/.exec(t.pos || '')
+  if (!xy) return ''
+  return [xy[1], xy[2], t.target, labelOf(t.target)].join('|')
+}).filter(Boolean).join(';')
+// 野怪记录 = "positionIndex|精灵swfId|等级|fx|fy|名字" (tools/build-wild-index.mjs 合成的表)
+const wildOf = id => (M.wild?.maps?.[id] || []).map(p => {
+  const e = M.wild.pool.get(p.pet) || {}
+  return [p.idx, e.swfId ?? p.pet, p.level, p.fx, p.fy, String(e.name || p.pet).replace(/[|;]/g, '')].join('|')
+}).join(';')
+
+const ov = document.getElementById('ov'), octx = ov.getContext('2d')
+const lctx = document.getElementById('lbl').getContext('2d')
+let showGrid = false
+
+// 野怪脚标 = 原版 core/utils/LabelRenderer 的五遍描边: 12px, 前景 0xCC9900, 轮廓 0xFFFFFF,
+// 同一字形在上下左右各偏 1px 涂背景色, 再在正中涂前景色 (BitmapData 矩阵 (1,0)(0,1)(2,1)(1,2) + (1,1))。
+// 字形没画进 SWF 是因为 Ruffle 的 _sans 没有中日韩字形, mxmlc [Embed] 的 DefineFont4 它又整个忽略
+// (诊断见 tools/fonttest.mjs: 嵌入字体与 _sans 的度量逐像素相同)。位置仍照原版 UNDER_FEET: 横向居中贴在脚下。
+function drawLabels(pets, camX, camY) {
+  lctx.clearRect(0, 0, 1200, 660)
+  if (!pets || !pets.length) return
+  lctx.font = '12px sans-serif'
+  lctx.textAlign = 'center'
+  lctx.textBaseline = 'top'
+  for (const s of pets) {
+    const [px, py, lv, name] = s.split('|').slice(1)
+    const t = 'Lv' + ((lv | 0) ? lv : '???') + ' ' + name
+    const x = camX + Number(px), y = camY + Number(py)
+    if (x < -60 || x > 1260 || y < -20 || y > 680) continue
+    lctx.fillStyle = '#ffffff'
+    for (const [dx, dy] of [[0, -1], [-1, 0], [1, 0], [0, 1]]) lctx.fillText(t, x + dx, y + dy)
+    lctx.fillStyle = '#cc9900'
+    lctx.fillText(t, x, y)
+  }
+}
+
+// ---- HUD 数据源 (主界面面板本体在 maprunner/HudRunner.as 里, 这里只喂内容) ----
+// 原版这些数值全部来自服务端 socket (CLI_MONEY_COUNT_1253 / ActorManager.actorInfo /
+// PetInfoManager.getAllBagPetInfo)。单机复刻就存在浏览器里, 首次进图用一份默认存档。
+const SAVE_KEY = 'rocoshowdown.save.v1'
+// 物品背包: {id, count} —— id 就是原版 ItemConfig 的 ItemID, 名字/描述/图标全从 items.json 查
+const STARTER_ITEMS = [
+  { id: 200001, count: 5 }, { id: 200002, count: 3 }, { id: 200003, count: 1 },
+  { id: 200011, count: 8 }, { id: 200012, count: 5 }, { id: 200013, count: 2 },
+  { id: 200021, count: 6 }, { id: 200022, count: 3 }, { id: 200031, count: 4 },
+  { id: 300001, count: 1 }, { id: 300003, count: 1 },
+  { id: 400001, count: 12 }, { id: 400002, count: 7 }, { id: 500001, count: 1 },
+  { id: 102001, count: 1 },
+]
+const SAVE = Object.assign({ name: '小赛尔', level: 1, coins: 5000, diamonds: 0, bag: [], items: null },
+  JSON.parse(localStorage.getItem(SAVE_KEY) || '{}'))
+function saveNow() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(SAVE)) } catch (e) { } }
+// ---- SAVE v2 (game/logic/session.js) ----
+// 精灵/道具/图鉴的唯一真源是 v2 (战斗页同写); v1 只留 名字/等级/硬币 显示与迁移源。
+let SESSION = null, S = null, _sessPromise = null
+function initSession() {
+  if (!_sessPromise) _sessPromise = (async () => {
+    SESSION = await import('./logic/session.js')
+    const rules = await fetch('/game/data/rules.json').then(r => r.json())
+    const db = await petDB()
+    S = SESSION.loadSession(localStorage, db, rules)
+    if (!S.items.length) {
+      for (const it of STARTER_ITEMS) SESSION.addItem(S, it.id, it.count)
+      SESSION.saveSession(localStorage, S)
+      logLine('新手补给已发放 (物品背包为空, 按原版默认包补齐)')
+    }
+    SAVE.name = S.trainer.name || SAVE.name
+    SAVE.level = S.trainer.level || SAVE.level
+    SAVE.coins = S.trainer.coins
+    SAVE.diamonds = S.trainer.diamonds
+  })()
+  return _sessPromise
+}
+function applyBattleResult() {
+  let raw = null
+  try { raw = sessionStorage.getItem('roco.battle.result.v1'); sessionStorage.removeItem('roco.battle.result.v1') } catch (e) { }
+  if (!raw) return
+  let R = null
+  try { R = JSON.parse(raw) } catch (e) { logLine('战果解析失败: ' + e); return }
+  const CN = { capture: '抓到', win: '打赢', lose: '战败', escape: '逃脱', surrender: '撤退' }
+  const w = R.wild ? ' 野怪 ' + ((PETDB && PETDB.monsters[R.wild.petId] || {}).name || R.wild.petId) + ' Lv' + R.wild.level : ''
+  const c = R.captured ? ' → 新成员入' + (R.captured.where === 'box' ? '仓库' : '队伍') : ''
+  logLine(`✦ 战果: ${CN[R.outcome] || R.outcome || '?'}${w}${c}`)
+}
+let PETDB = null
+async function petDB() {
+  if (!PETDB) PETDB = await (await fetch('/game/data/pets.json')).json()
+  return PETDB
+}
+// 背包格记录 = "swfId|名字|等级|hp|hpMax" (HudRunner.fillCell 的解析格式) — 数据源 v2 出战队
+async function bagRecords() {
+  if (!S || !SESSION) return []
+  return S.team.slice(0, 8).map(p => {
+    const hpMax = SESSION.petHpMax(PETDB, p)
+    return [p.swfId, String(p.name).replace(/[|;]/g, ''), p.level, Math.max(0, p.hp), hpMax].join('|')
+  })
+}
+async function pushHud() {
+  const p = M.player
+  if (!p) return
+  try {
+    if (!S) await initSession()
+    p.hudProfile(SAVE.name, 'Lv' + SAVE.level, String(SAVE.coins), String(SAVE.diamonds))
+    p.hudBag(await bagRecords())
+    p.hudTitle(M.map ? String(M.map.name).replace(/[|;]/g, '') : '')
+  } catch (e) { logLine('HUD 喂数据失败: ' + e) }
+}
+
+// ---- 物品背包数据源 (面板本体在 maprunner/ItemBagRunner.as, 素材是原版 module/app/ItemBagPanel.swf) ----
+let ITEMDB = null
+async function itemDB() {
+  if (!ITEMDB) ITEMDB = await (await fetch('/game/data/items.json')).json()
+  if (SAVE.items == null) { SAVE.items = STARTER_ITEMS.map(r => ({ ...r })); saveNow() }   // 首次给一份新手包
+  return ITEMDB
+}
+// 喂给 ItemBagRunner 的行 = 原版 ItemManager.getItemArr() 里那些字段的等价物
+async function itemRows() {
+  const db = await itemDB()
+  const list = S ? S.items : SAVE.items
+  return list.map(r => {
+    const d = db.items[r.id]
+    if (!d) return null
+    return { id: d.id, name: d.name, count: r.count, tip: d.tip || '', price: d.price || 0, sell: d.sellprice || 0, icon: d.icon, vip: Number(d.viponly) || 0 }
+  }).filter(Boolean)
+}
+async function toggleBag() {
+  const p = M.player
+  if (!p) return
+  try {
+    p.bagItems(await itemRows())
+    p.bagMoney(String(SAVE.coins), String(SAVE.diamonds))
+    p.bagOpen()
+  } catch (e) { logLine('背包喂数据失败: ' + e) }
+}
+const tipEl = document.getElementById('bagtip')
+function showBagTip(d) {
+  if (!d.show) { tipEl.style.display = 'none'; return }
+  const it = d.item || {}
+  tipEl.textContent = ''
+  const t = document.createElement('b'); t.textContent = String(it.name || '')
+  const s = document.createElement('span'); s.textContent = String(it.tip || '')
+  const f = document.createElement('i'); f.textContent = '售价 ' + (Number(it.sell) || 0) + ' · 持有 ' + (Number(it.count) || 1)
+  tipEl.append(t, s, f)
+  tipEl.style.display = 'block'
+  // 原版 toolTip 贴在格子右下; 靠边就翻到左边, 别出画面
+  const x = Number(d.x) + Number(d.w) + 6
+  tipEl.style.left = (x + 250 > 1200 ? Math.max(4, Number(d.x) - 254) : x) + 'px'
+  tipEl.style.top = Math.max(4, Math.min(600, Number(d.y) - 6)) + 'px'
+}
+function useItem(id, name) {
+  if (S && SESSION) {
+    if (!SESSION.consumeItem(S, id)) { logLine(`${name}: 数量不足`); return }
+    SESSION.saveSession(localStorage, S)
+    logLine(`使用 ${name} ×1 (地图上使用效果未实装, 战斗内已接药剂/胶囊)`)
+  } else {
+    const rec = (SAVE.items || []).find(r => r.id === id)
+    if (!rec) return
+    rec.count = Math.max(0, rec.count - 1)
+    if (rec.count === 0) SAVE.items = SAVE.items.filter(r => r.id !== id)
+    saveNow()
+    logLine(`使用 ${name} ×1 (单机版只扣数量, 效果还没接)`)
+  }
+  toggleRefresh()
+}
+async function toggleRefresh() {                    // 只灌数据, 不动开关状态
+  const p = M.player
+  if (!p) return
+  try { p.bagItems(await itemRows()) } catch (e) { logLine('背包刷新失败: ' + e) }
+}
+
+// ---- 精灵背包数据源 (面板本体在 maprunner/PetBagRunner.as, 素材是原版 module/app/PetBagPanel.swf) ----
+// 行结构对齐原版 PetInfo 的最小集: 出战前 5 行, 其后 12 行/页进背包格, 再往后铺仓库 18 格。
+async function petRows() {
+  const db = await petDB()
+  if (!S || !SESSION) return []
+  // 出战顺序 = team, 其后 = 仓库; 等级/血量都是每只宠自己的 v2 数据
+  return [...S.team, ...S.box].map(p => {
+    const m = db.monsters[p.petId]
+    if (!m) return null
+    const hpMax = SESSION.petHpMax(db, p)
+    return {
+      id: p.uid, swfId: p.swfId, name: String(p.name).replace(/[|;]/g, ''), type: String(m.type || ''),
+      level: p.level, hp: Math.max(0, Math.min(p.hp, hpMax)), hpMax,
+      icon: '/swf/pet/icon/' + p.swfId + '.swf'
+    }
+  }).filter(Boolean)
+}
+async function togglePetBag() {
+  const p = M.player
+  if (!p) return
+  try {
+    p.petBagItems(await petRows())
+    p.petBagMoney(String(SAVE.coins), String(SAVE.diamonds))
+    p.petBagOpen()
+  } catch (e) { logLine('精灵背包喂数据失败: ' + e) }
+}
+function showPetTip(d) {                            // 中文进 DOM (SWF 子集字体没墨), textContent only
+  if (!d.show) { tipEl.style.display = 'none'; return }
+  const it = d.pet || {}
+  tipEl.textContent = ''
+  const t = document.createElement('b'); t.textContent = String(it.name || '')
+  const s = document.createElement('span'); s.textContent = (String(it.type || '')) + ' · Lv' + (Number(it.level) || 1)
+  const f = document.createElement('i'); f.textContent = 'HP ' + (Number(it.hp) || 0) + '/' + (Number(it.hpMax) || 0)
+  tipEl.append(t, s, f)
+  tipEl.style.display = 'block'
+  const x = Number(d.x) + Number(d.w) + 6
+  tipEl.style.left = (x + 250 > 1200 ? Math.max(4, Number(d.x) - 254) : x) + 'px'
+  tipEl.style.top = Math.max(4, Math.min(600, Number(d.y) - 6)) + 'px'
+}
+// HUD 点击 → 有对应实现的就动, 没有的只报一行 (原版这些按钮各自开一个 app/processor 面板模块)
+const HUD_TODO = {
+  actorBag: '角色背包', petBag: '精灵背包', teamBtn: '战队', buddyBtn: '好友', homePanel: '家园',
+  trainerBtn: '训练师', shootBtn: '射击', shipmapBtn: '星际地图', systemPanel: '系统',
+  shouyouBtn: '手游推广', nonoPanel: 'NONO', emotionBtn: '表情', userUp: '升级信息',
+  yueseNono: '角色NONO', skyBtn: '天空', sptBtn: 'SPT', monsterBtn: '怪物', copyBtn: '副本',
+  fortressBtn: '要塞', questBtn: '任务', dicPanel: '图鉴', mapBtn: '地图'
+}
+function onHudClick(what) {
+  if (what === 'actorBag') { toggleBag(); return }     // 原版 ActorBagWidgetClick → toggleModule(ItemBagPanel)
+  if (what === 'petBag') { togglePetBag(); return }    // 原版 PetBagWidgetClick → toggleModule(PetBagPanel)
+  logLine('HUD 点击 ' + what + (HUD_TODO[what] ? ' · ' + HUD_TODO[what] + ' 面板未复刻' : ''))
+}
+
+// HUD 里 TextField 的中文字形落不到墨: UI_hud.swf 的 DefineFont2 只按设计期文本做了子集,
+// 我们换上去的「小赛尔 / 监狱 / 精灵名」不在子集里 → 只有 ASCII (Lv1 / 5000 / 728/728) 有墨。
+// 所以 HudRunner 每次 flushTexts 把舞台坐标报过来 (hudTexts), 含非 ASCII 的那几条在 #hudtxt 补描。
+// 位置/字号取自 TextField 自己的包围盒, 不动版面上的任何东西。
+const hctx = document.getElementById('hudtxt').getContext('2d')
+function drawHudTexts(list) {
+  hctx.clearRect(0, 0, 1200, 660)
+  for (const s of list || []) {
+    const splt = s.split('|')
+    if (splt.length < 5) continue
+    const [key, x, y, box] = splt
+    const text = splt.slice(4).join('|')
+    if (!/[^\x00-\x7f]/.test(text)) continue            // ASCII 那几条 SWF 自己画得出, 别描两遍
+    const hm = /^(\d+)x(\d+)$/.exec(box || '') || []
+    const size = Math.max(11, (Number(hm[2]) || 16) - 4)
+    hctx.font = (key === 'mapTitle' ? 'bold ' : '') + size + 'px system-ui,sans-serif'
+    hctx.textAlign = 'left'
+    hctx.textBaseline = 'top'
+    if (key === 'mapTitle') {                            // 地图名压在场景上, 沿用原版 LabelRenderer 的五遍描边
+      hctx.fillStyle = '#1b2733'
+      for (const [dx, dy] of [[0, -1], [-1, 0], [1, 0], [0, 1]]) hctx.fillText(text, Number(x) + dx, Number(y) + 1 + dy)
+    }
+    hctx.fillStyle = key.startsWith('petName') ? '#ffe066' : '#ffffff'
+    hctx.fillText(text, Number(x), Number(y) + 1)
+  }
+}
+
+function updateHint() {
+  const d = M.info || {}
+  const dex = S ? ` · 图鉴 ${Object.values(S.dex || {}).filter(x => x.caught).length} 抓到` : ''
+  document.getElementById('hint').textContent =
+    `${M.map ? M.map.name + ' · ' : ''}地图就绪 · ${Math.round(d.mapW) || '?'}x${Math.round(d.mapH) || '?'} · `
+    + `${d.freeRoam ? '整图可走（栅格极性存疑，仅作调试叠加）' : '正在解析 path_mc…'} · ${M.spots.length} 个传送点 · `
+    + `${M.petCount || 0} 只野怪 · 点击地面行走, 点击野怪开战${dex}`
+}
+
+addEventListener('message', async e => {
+  const d = e.data || {}
+  const t = String(d.type || '')
+  if (!d.type || (!t.startsWith('map') && !t.startsWith('hud') && !t.startsWith('bag') && !t.startsWith('petBag')) || d.instanceId !== 'map') return
+  if (d.type === 'hudBind') { logLine(`HUD ${d.ok ? '✓' : '✗'} ${d.info}`); if (d.ok) pushHud(); return }
+  if (d.type === 'hudClick') { onHudClick(d.what); return }
+  if (d.type === 'bagBind') { logLine(`背包 ${d.ok ? '✓' : '✗'} ${d.info}`); return }
+  if (d.type === 'bagInfo') { logLine(`背包 ${d.tab} · 第 ${d.page} 页 · ${d.shown} 件`); return }
+  if (d.type === 'bagTip') { showBagTip(d); return }
+  if (d.type === 'bagUse') { useItem(Number(d.id), String(d.name)); return }
+  if (d.type === 'petBagBind') { logLine(`精灵背包 ${d.ok ? '✓' : '✗'} ${d.info}`); return }
+  if (d.type === 'petBagInfo') { logLine(`精灵背包 ${d.tab} · 第 ${d.page} 页 · ${d.pets} 只`); return }
+  if (d.type === 'petBagTip') { showPetTip(d); return }
+  if (d.type === 'petBagSelect') { logLine(`选中精灵 ${d.name} Lv${d.level} (${d.zone} · swfId ${d.swfId})`); return }
+  if (d.type === 'petBagTodo') { logLine(`精灵背包按钮 ${d.name} 未接`); return }
+  if (d.type === 'hudTexts') { M.hudTexts = d.list || []; drawHudTexts(M.hudTexts); return }
+  if (d.type === 'hudRetract') { logLine(`HUD 收起 ${d.panel} = ${d.hidden}`); return }
+  if (d.type === 'mapReady') {
+    M.info = d
+    updateHint()
+    pushHud()                       // 换图后地图名要跟着走 (原版 MapTitlePanel.update)
+    if (!d.freeRoam) sendWalkGrid()
+  }
+  if (d.type === 'mapWorld') { M.spots = d.spots || []; draw(); return }
+  if (d.type === 'mapWild') { M.petCount = d.count || 0; logLine(`野怪 ${d.count} 只站图${d.miss ? ' (缺包 ' + d.miss + ')' : ''}`); updateHint(); return }
+  if (d.type === 'mapPets') { M.pets = d.p || []; drawLabels(M.pets, d.camX, d.camY); return }
+  if (d.type === 'mapWildFight') { startWildFight(d); return }
+  if (d.type === 'mapFail') { await restoreAfterFail(d.url); return }
+  if (d.type === 'mapEnter') { gotoMap(d.target, true); return }
+  if (d.type === 'mapGridNative') { logLine(`原版 extractPath (BitmapData.draw): 可走 ${d.walkable}/${d.total} = ${(d.walkable * 100 / d.total).toFixed(1)}%`); return }
+  if (d.type === 'mapGrid') {
+    logLine(`✓ 可走栅格 ${d.gw}x${d.gh} cell=${d.cell} 阻挡 ${(d.ratio * 100).toFixed(1)}%`)
+    draw()
+  }
+  if (d.type === 'mapState') { M.cam.x = d.camX; M.cam.y = d.camY; M.pos = { x: d.x, y: d.y }; draw() }
+  if (d.type === 'mapWalk') { logLine(`→ walk (${Math.round(d.x)},${Math.round(d.y)}) 航点 ${d.nodes}${d.skipped ? ' [' + d.skipped + ']' : ''}${d.teleport ? ' ⤷ 传送目标 ' + nameOf(d.teleport) : ''}`); M.pos = { x: d.x, y: d.y }; draw() }
+  if (d.type === 'mapArrive') { logLine(`✓ arrive (${Math.round(d.x)},${Math.round(d.y)})`); draw() }
+  if (d.type === 'mapLog') logLine(`! ${d.msg}`)
+})
+
+async function sendWalkGrid() {
+  try {
+    const S = await import('./swfshape.mjs')
+    const swf = await S.fetchSwf(M.mapUrl)
+    const w = S.walkGridOf(swf, 10)
+    M.grid = w
+    M.player.setWalkGrid(w.ox, w.oy, w.cell, w.gw, w.gh, w.ascii)
+    logLine(`解析 path_mc: ${w.contours} 轮廓 / ${w.segments} 段 → ${w.gw}x${w.gh} 栅格`)
+    draw()
+  } catch (e) { logLine('栅格解析失败: ' + e.message) }
+}
+
+// 覆盖层: 绿=可走, 红=阻挡 (按相机偏移对齐舞台)
+function draw() {
+  octx.clearRect(0, 0, ov.width, ov.height)
+  const g = M.grid
+  if (g && showGrid) {
+    octx.save(); octx.translate(M.cam.x + g.ox, M.cam.y + g.oy)
+    for (let j = 0; j < g.gh; j++) for (let i = 0; i < g.gw; i++) {
+      octx.fillStyle = g.ascii[j * g.gw + i] === '1' ? 'rgba(230,60,60,.34)' : 'rgba(60,230,140,.22)'
+      octx.fillRect(i * g.cell, j * g.cell, g.cell, g.cell)
+    }
+    octx.restore()
+  }
+  if (M.pos) {
+    octx.fillStyle = '#ffe066'
+    octx.beginPath(); octx.arc(M.cam.x + M.pos.x, M.cam.y + M.pos.y, 4, 0, 7); octx.fill()
+  }
+  // 传送点热区: 青色圈 + 目标名 (半透明判定半径 = MapRunner.HOT_R)
+  for (const s of M.spots) {
+    const x = M.cam.x + s.x, y = M.cam.y + s.y
+    octx.strokeStyle = 'rgba(90,220,255,.55)'; octx.lineWidth = 1
+    octx.beginPath(); octx.arc(x, y, 26, 0, 7); octx.stroke()
+    octx.fillStyle = 'rgba(90,220,255,.9)'; octx.font = 'bold 14px system-ui'
+    octx.beginPath(); octx.arc(x, y, 7, 0, 7); octx.fill()
+    octx.strokeStyle = '#5adcff'
+    octx.beginPath(); octx.moveTo(x - 3, y); octx.lineTo(x + 3, y); octx.moveTo(x + 1, y - 3); octx.lineTo(x + 3, y); octx.lineTo(x + 1, y + 3); octx.stroke()
+    octx.fillStyle = '#bdeaff'; octx.font = '12px system-ui'
+    octx.fillText('⇒ ' + s.label, x + 12, y - 10)
+  }
+}
+
+async function loadMapRunner() {
+  const wrap = document.getElementById('wrap')
+  wrap.querySelectorAll('ruffle-player').forEach(n => n.remove())
+  M.player = null; M.grid = null; M.pos = null; M.info = null; M.spots = []; M.petCount = 0; M.cam = { x: 0, y: 0 }
+  M.pets = []; drawLabels(null); drawHudTexts(null)
+  draw()
+  const p = window.RufflePlayer.newest().createPlayer()
+  wrap.appendChild(p)
+  const ready = new Promise(r => {
+    const h = e => { if (e.data?.type === 'mapReady' && e.data?.instanceId === 'map') { removeEventListener('message', h); r() } }
+    addEventListener('message', h)
+    setTimeout(() => { removeEventListener('message', h); r() }, 25000)
+  })
+  M.map = byId.get(document.getElementById('mapSel').value) || null
+  M.mapUrl = '/swf/map/' + ((M.map && M.map.swf) || document.getElementById('mapSel').value + '.swf')
+  const init = (M.map && M.map.init) || {}
+  const q = new URLSearchParams({
+    mapUrl: M.mapUrl, actorColor: document.getElementById('avSel').value, instanceId: 'map',
+    spots: spotsOf(M.map || {}), initX: init.x ?? -1, initY: init.y ?? -1,
+    wild: wildOf((M.map && M.map.id) || document.getElementById('mapSel').value),
+  })
+  await p.ruffle().load({
+    url: '/game/maprunner/mapRunner.swf?' + q,
+    // webgl 后端下 BitmapData.draw 的 readPixels 回读在软件 GPU 上会抖到几十秒, 默认走 canvas
+    renderer: new URLSearchParams(location.search).get('renderer') || 'canvas',
+    allowScriptAccess: true, autoplay: 'on', unmuteOverlay: 'hidden',
+    scale: 'noScale', menu: false, warnOnUnsupportedContent: false,
+  }).catch(e => logLine('load failed: ' + e))
+  await ready
+  M.player = p
+  pushHud()      // hudBind 可能先到 (此时 M.player 还是 null), 这里补一次
+  draw()
+  syncBackBtn()
+}
+
+// 换图但不重建播放器: 角色部件包 (8 个 .bin) 只加载一次
+async function worldLoad(id) {
+  const m = byId.get(id)
+  if (!m) { logLine('目标地图无条目: ' + id); return }
+  if (!M.player?.loadWorld) { await loadMapRunner(); return }
+  M.map = m
+  M.mapUrl = '/swf/map/' + m.swf
+  M.grid = null; M.spots = []; M.petCount = 0
+  document.getElementById('mapSel').value = id
+  document.getElementById('hint').textContent = `传送至 ${m.name}…`
+  const init = m.init || {}
+  try { M.player.loadWorld(M.mapUrl, init.x ?? -1, init.y ?? -1, spotsOf(m), wildOf(id)) }
+  catch (e) { logLine('loadWorld 失败, 重建容器: ' + e); await loadMapRunner() }
+  syncBackBtn()
+}
+async function gotoMap(id, pushHist) {
+  if (pushHist && M.map) M.hist.push(M.map.id)
+  await worldLoad(id)
+}
+function syncBackBtn() { document.getElementById('backBtn').disabled = M.hist.length === 0 }
+
+// 目标图缺场景资源 (maps.json.swfOk=false 的 4 张): 老图还在屏幕上, 退回上一图恢复出口表
+async function restoreAfterFail(url) {
+  logLine('✗ 场景资源缺失 ' + url + (M.player ? ' → 退回上一图' : ''))
+  if (!M.player) return
+  const prev = M.hist.pop()
+  if (prev) await worldLoad(prev)
+}
+
+// 点野怪 → 角色跑到脚下 → MapRunner 报 mapWildFight → 换战斗场景
+// 原版: FightManager.startFightWithWild(positionIndex) → 1500 协议 → SceneManager.changeScene(ARENA, mapModel.fightMapId)
+// 我方没有服务端, 怪的信息由 URL 带给 battle.html; fightMapId 就是 maps.json 里那个字段
+function startWildFight(d) {
+  const m = byId.get((M.map && M.map.id) || '') || {}
+  // fightMapOk: 258 张图有 <fightMap>, 但本地只爬到 77 张战斗场景; 缺的就不传 map 参数, 由战斗页用自己的缺省图
+  const fm = m.fightMapOk ? m.fightMap : null
+  const q = new URLSearchParams({ wild: d.petId, level: d.level, slot: d.positionIndex, back: m.id || '' })
+  if (fm) q.set('map', fm)
+  document.getElementById('hint').textContent = `遭遇 Lv${d.level} ${d.name} · 战斗图 ${fm || '缺省'}`
+  logLine(`⚔ 遭遇 Lv${d.level} ${d.name} (槽位 ${d.positionIndex})${m.fightMap ? ' fightMap=' + m.fightMap + (fm ? '' : ' 本地缺图→用缺省') : ' 无 fightMap→用缺省'} → battle.html?${q}`)
+  setTimeout(() => { location.href = 'battle.html?' + q }, 400)
+}
+
+document.getElementById('reloadBtn').onclick = () => { document.getElementById('hint').textContent = '载入中…'; M.hist = []; loadMapRunner() }
+document.getElementById('backBtn').onclick = () => { const prev = M.hist.pop(); if (prev) worldLoad(prev) }
+document.getElementById('gridBtn').onclick = ev => {
+  showGrid = !showGrid; ev.target.classList.toggle('on', showGrid)
+  if (showGrid && !M.grid) sendWalkGrid(); else draw()
+}
+document.getElementById('statusBtn').onclick = () => {
+  try { document.getElementById('stat').textContent = M.player?.getStatus?.() || 'no player' } catch (e) { document.getElementById('stat').textContent = 'err ' + e }
+}
+document.getElementById('walkBtn').onclick = async () => {
+  if (!M.info) return
+  const t = (loadMapRunner.n = (loadMapRunner.n || 0) + 1) % 4
+  const fx = [0.25, 0.75, 0.6, 0.3][t], fy = [0.55, 0.75, 0.9, 0.65][t]
+  try { M.player.walkTo(M.info.mapX + M.info.mapW * fx, M.info.mapY + M.info.mapH * fy) } catch (e) { logLine('walkTo err ' + e) }
+}
+
+// 地图清单 = tools/build-map-index.mjs 从爬取的 res/map/config/*.xml 生成
+const FALLBACK_MAPS = ['1.swf', '100002.swf', '1000000.swf']
+async function initMaps() {
+  let list = []
+  try {
+    const r = await fetch('/game/data/maps.json')
+    if (r.ok) list = (await r.json()).filter(m => m.swf)
+  } catch { /* 无清单 */ }
+  if (!list.length) list = FALLBACK_MAPS.map(s => ({ id: s.replace('.swf', ''), name: s.replace('.swf', ''), swf: s }))
+  byId = new Map(list.map(m => [m.id, m]))
+  M.hist = []
+  try {
+    const w = await (await fetch('/game/data/wild.json')).json()
+    M.wild = { pool: new Map(w.pool.map(p => [p.id, p])), maps: w.maps }
+    logLine(`野怪表: ${w.pool.length} 种 / ${Object.keys(w.maps).length} 张图有怪 (合成, 见 tools/build-wild-index.mjs)`)
+  } catch (e) { logLine('野怪表读不到: ' + e) }
+  try {
+    await initSession()
+    applyBattleResult()
+    const dk = Object.keys(S.dex || {})
+    const seen = dk.filter(k => S.dex[k].seen).length
+    const caught = dk.filter(k => S.dex[k].caught).length
+    logLine(`图鉴: 见过 ${seen} · 抓到 ${caught} · 队伍 ${S.team.length} 只 / 仓库 ${S.box.length} 只`)
+  } catch (e) { logLine('会话载入失败: ' + e) }
+  document.getElementById('mapSel').innerHTML = list
+    .map(m => `<option value="${m.id}"${m.swfOk === false ? ' disabled' : ''}>${m.name || m.id} · ${m.id}${m.swfOk === false ? ' ⚠缺图' : ''}${(m.teleports || []).length ? ' ⇄' + m.teleports.length : ''}${(M.wild?.maps?.[m.id] || []).length ? ' ⚔' + M.wild.maps[m.id].length : ''}</option>`).join('')
+  // 战斗页「返回地图」带 ?map=; 缺场景资源的图不作目标
+  const want = new URLSearchParams(location.search).get('map')
+  if (want && byId.has(want) && byId.get(want).swfOk !== false) document.getElementById('mapSel').value = want
+  document.getElementById('mapSel').onchange = () => { M.hist = []; loadMapRunner() }
+  await loadMapRunner()
+}
+initMaps()
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "name": "seer2-live-app",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Linux 承载端：真 Flash PPAPI + 复用春树启动器网络层（研究用途）",
+  "main": "main.js"
+}

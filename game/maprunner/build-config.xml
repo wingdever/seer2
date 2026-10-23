@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<flex-config>
+  <compiler>
+    <headless-server>true</headless-server>
+  </compiler>
+  <metadata>
+    <title>maprunner</title>
+  </metadata>
+  <default-size>
+    <width>1200</width>
+    <height>660</height>
+  </default-size>
+  <default-frame-rate>24</default-frame-rate>
+  <default-background-color>0x000000</default-background-color>
+</flex-config>

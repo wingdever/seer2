@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    差分 oracle：不重编上游 C#，而是**直接加载《阿卡迪亚：重启》自己编译出来的
+    Assembly-CSharp.dll**，用反射调用 Parser/Operator/Identifier 的真函数。
+    这样 oracle 就是参考实现本身，杜绝"我照着源码又写一遍、然后自己跟自己对拍"的循环论证；
+    顺带把 Mathf.RoundToInt 这类只在 Unity 运行时里才有权威答案的问题一次坐实。
+    仅本地研究用途，产物不入库、不分发。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>oracle</AssemblyName>
+    <RootNamespace>Oracle</RootNamespace>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <NoWarn>CS0618</NoWarn>
+  </PropertyGroup>
+
+</Project>

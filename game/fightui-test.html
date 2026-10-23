@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>fightUI smoke</title>
+<style>body{margin:0;background:#14161c}#ui{position:relative;width:1200px;height:660px}#ui ruffle-player{width:100%;height:100%;display:block}</style>
+<script src="/ruffle/ruffle.js"></script>
+</head>
+<body>
+<div id="ui"></div>
+<script>
+window.addEventListener('message', e => { console.log('MSG:' + JSON.stringify(e.data)); if (e.data?.type === 'fightUIReady') window.__uiReady?.() })
+const readyP = new Promise(r => window.__uiReady = r)
+const p = window.RufflePlayer.newest().createPlayer()
+document.getElementById('ui').appendChild(p)
+const q = new URLSearchParams({ uiUrl: '/swf/ui/UI_Arena.swf', instanceId: 'test' })
+p.ruffle().load({ url: '/game/fightui/fightUI.swf?' + q, allowScriptAccess: true, wmode: 'transparent', autoplay: 'on', unmuteOverlay: 'hidden', scale: 'noScale' })
+  .catch(err => console.log('LOADERR:' + err))
+readyP.then(() => {
+  p.setFighter('left', '烈火兽', 42, 320, 400, 55, 100)
+  p.setFighter('right', '冰霜灵', 45, 120, 480, 30, 100)
+  p.setSkills([
+    { name: '烈焰爪', anger: 20, power: 45, category: '物理' },
+    { name: '炽炎波', anger: 30, power: 70, category: '魔法' },
+    { name: '燃魂', anger: 40, power: 95, category: '魔法' },
+    { name: '火盾', anger: 25, power: 0, category: '属性' },
+    { name: '烈焰灭世', anger: 100, power: 150, category: '必杀' },
+  ])
+  console.log('API_DONE')
+}).catch(err => console.log('APIERR:' + err))
+</script>
+</body>
+</html>

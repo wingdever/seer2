@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>赛尔号2</title>
+    <style>
+        html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: #000; }
+        #__flash_center { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    </style>
+</head>
+<body>
+    <div id="__flash_center"><div id="flashContentWrap"><div id="flashbox"><div id="flashContent"></div></div></div></div>
+
+    <!-- 三处相对春树原版 index 的改动，都是实测出来的必要修正：
+         1. swfobject.js 用绝对路径。原版写 "static/swfobject.js"，从 /seer2/ 起会解析成
+            /static/swfobject.js（404），Flash 根本不实例化。
+         2. 不加载官方 //webres.61.com/.../gameSeer2.js。它在本页找不到自己的 DOM 就抛
+            "Cannot read property 'style' of null"，纯噪音。
+         3. wmode 用 opaque 而不是 window。window 模式下 PPAPI 会开自己的 X 子窗口，
+            Chromium 既合成不到它（capturePage 抓白），也送不进输入事件（sendInputEvent 无效）。
+            opaque 模式下插件回到页面图层里，自动化与截图判据才成立。 -->
+    <script src="/seer2/static/swfobject.js"></script>
+    <script>
+        var so = new SWFObject("/Client.swf", "Client", "1200", "660", "10", "#FFFFFF");
+        so.addParam("menu", "false");
+        so.addParam("wmode", "opaque");
+        so.addParam("allowFullScreen", "true");
+        so.addParam("allowScriptAccess", "always");
+        so.addParam("allowFullScreenInteractive", "true");
+        so.addParam("quality", "high");
+        so.write("flashContent");
+    </script>
+</body>
+</html>

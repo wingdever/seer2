@@ -1,0 +1,74 @@
+# ────────────────────────────────────────────────────────────────
+# seer2 · 忽略清单
+# 原则（人类 2026-10-24 三段发布 · 收紧为「git 只装自己编写的文本源码」）：
+#   ①git = 自有源码/文档/工具（+ 两张自推导真值 CSV = 唯一例外，见 docs/asset-inventory.md §5）
+#   素材与数据走 ②必要素材包 / ③网络拉取（清单与命令 = docs/asset-inventory.md §5）。
+# ⚠️ git 的「注释」必须独占一行：行尾 # 会被当成模式的一部分。
+# ────────────────────────────────────────────────────────────────
+
+# ── 上游发行包树 / 上游样本 / 上游数据（全出 → ②必要素材包）──
+/projects/
+/assets/
+/samples/
+# 上游真档夹具（Save 线比对基准）
+/tools/fixtures/
+
+# ── 三方仓与源码快照（vendor 整棵不进 git；tar.gz 随②号包）──
+/vendor/
+
+# ── swf 素材（整棵不进 git：大件→③网络拉取，人工采集/上游小件→②必要素材包）──
+/swf/
+
+# ── 生成的数据桥与盘点件（build-*.mjs 产物；两张真值 CSV 例外放行）──
+/game/data/*
+!/game/data/map_swf.csv
+!/game/data/pet_appearance_swf.csv
+
+# ── 自编译/加工的二进制产物（重编译命令见 docs/external-refs.md §7）──
+/game/**/*.swf
+/game/scenes/
+/game/battle-kernel.js
+/game/gaf-player.js
+
+# ── core 内核 .js = build-core.mjs 机械转写产物（.ts 才是权威源；克隆后 node tools/build-core.mjs 重生成）──
+/game/core/**/*.js
+
+# ── Ruffle 播放器软链（npm install 产物）──
+/ruffle
+
+# ── 一次性探针/测试的编译 swf（README：tools/probes 可弃）──
+/tools/**/*.swf
+
+# ── 上游参考与证据（体积巨大，只留本机）──
+/har/
+
+# ── 三方与参考素材（115M）──
+/tools/vendor/
+
+# ── 依赖 ──
+/node_modules/
+
+# ── 生成物（改源必重生成，勿入库；见 docs/arch-code.md §7）──
+/tools/oracle-cs/bin/
+/tools/oracle-cs/obj/
+
+# ── 静图离线提取产物（人类 2026-10-20 拍板「不入库」；命令见 docs/item/item-design.md §3.1）──
+/svg/
+/png/
+
+# ── 运行时日志 ──
+/logs/
+
+# ── 运行时存档（真档落点 saves/save{id}.xml，只留本机；写端点 = tools/serve.mjs）──
+/saves/
+
+# ── M8 装备包本地样本（从改服缓存提取，本机研究、禁二次分发）──
+/game/data/actor/equip/*.bin
+/game/data/actor/equip/*.swf
+
+# ── 编辑器 / 系统 ──
+/.marscode/
+/.qoder/
+.DS_Store
+*.swp
+*~

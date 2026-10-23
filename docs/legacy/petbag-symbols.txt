@@ -1,0 +1,260 @@
+SymbolClass 绑定 119 条
+  com.taomee.seer2.module.app.appraisal.AppraisalPanelUI → id245
+  TabUI → id83
+  _fla.Timeline_131 → id14
+  _fla.Timeline_139 → id27
+  _fla._777898_357 → id960
+  ChangeCharactorAni → id946
+  mz_4 → id125
+  ssp → id127
+  mz_3 → id136
+  mz_2 → id144
+  _fla.Timeline_80 → id112
+  pf_1 → id145
+  fl.text.TCMText → id142
+  pf_4 → id171
+  CandidateSkillUI → id962
+  CriticalSkillCellUI → id196
+  AvailableSkillUI → id200
+  _fla.Timeline_306 → id143
+  mz_1 → id250
+  _fla.Timeline_148 → id39
+  _fla.Timeline_301 → id170
+  _fla.vip_28 → id424
+  _fla.Timeline_92 → id484
+  PetItemBagUI → id349
+  starLevelUpPanel → id1006
+  _fla.Timeline_157 → id51
+  staricon0 → id1030
+  StarPicture → id378
+  starPanel2 → id1149
+  staricon2 → id1155
+  staricon1 → id1156
+  staricon4 → id1157
+  staricon3 → id1158
+  qdzy_4 → id1187
+  jg_103 → id1194
+  GetBackButton → id460
+  _fla.Timeline_69 → id280
+  GotExpPanelUI → id411
+  tg_2 → id1210
+  tg_3 → id1211
+  SelectSkillUI → id1216
+  tg_1 → id1217
+  _fla.Timeline_65 → id717
+  PetCellResUI → id444
+  SetPotentionUI → id480
+  tg_4 → id1218
+  _fla.n_m9sjmrhjvvc_54 → id739
+  _fla.Timeline_167 → id66
+  ItemCellUI → id1221
+  kb_9 → id1226
+  PetBagBgUI → id1242
+  _fla.Timeline_207 → id330
+  _fla.Timeline_203 → id324
+  sb_4 → id496
+  GraspHideSkillUI → id498
+  _fla.n_13dr07sip8pg_43 → id135
+  sb_1 → id499
+  _fla.Timeline_75 → id249
+  sb_3 → id500
+  sb_2 → id495
+  starPanel1 → id1377
+  NormalSkillCellUI → id1383
+  SetQualityUI → id570
+  CurePetsTipPanelUI → id586
+  _fla.shangxiajiantou_30 → id672
+  _fla.Timeline_210 → id336
+  bagShowPanel → id660
+  _fla.Font_0 → id714
+  com.taomee.seer2.module.app.appraisal.AppraisalResultPanelUI → id1027
+  ApprisalAni → id1389
+  _fla.Timeline_218 → id348
+  _fla.Timeline_214 → id342
+  js_4 → id669
+  tf_3 → id1401
+  tf_4 → id1402
+  tf_1 → id1400
+  tf_2 → id1403
+  PetSkillUI → id1411
+  BasePetAblilityUI → id683
+  qdzy_102 → id1417
+  sm_6 → id1449
+  sm_5 → id1468
+  CharactorSelectAni → id1471
+  PetListUI → id698
+  _fla.Timeline_225 → id1426
+  wg_4 → id710
+  _fla._655_34 → id427
+  wg_3 → id711
+  wg_2 → id712
+  wg_1 → id713
+  _fla.hongtao_97 → id855
+  _fla.Timeline_193 → id312
+  sm_2 → id1473
+  sm_1 → id1472
+  GotAttributePanelUI → id1499
+  sm_4 → id1500
+  sm_3 → id1501
+  dsp → id1503
+  PetDemoUI → id856
+  bj_3 → id1512
+  bj_4 → id1513
+  bj_1 → id1514
+  bj_2 → id1515
+  GraspSkillGetUI → id873
+  _fla.Timeline_240 → id517
+  _fla.n_d4cd0ni6qn6_38 → id437
+  StarTip → id881
+  HideSkillAlertUI → id907
+  _fla.Timeline_39 → id443
+  effect_seal → id169
+  _fla.dsfgdsfgsfdgsdfg_199 → id318
+  wf_4 → id919
+  wf_3 → id920
+  wf_2 → id918
+  _fla.jinyantiao_236 → id1198
+  wf_1 → id921
+  _fla.shuzilala_224 → id957
+  PetInfoUI → id1552
+  com.taomee.seer2.module.app.versionOnePetBagPanel.PetBagPanel → id0
+
+有命名子对象的 sprite: 46 / 574
+
+sprite1377 frames=1 子对象73:
+  bag0(d97,id1256) bag1(d101,id1256) bag2(d105,id1256) bag3(d109,id1256) bag4(d113,id1256) bag5(d117,id1256) bag6(d121,id1256) bag7(d125,id1256) bag8(d129,id1256) bag9(d133,id1256) bag10(d137,id1256) bag11(d141,id1256) depot0(d145,id1256) depot1(d149,id1256) depot2(d153,id1256) depot3(d157,id1256) depot4(d161,id1256) depot5(d165,id1256) closeBtn(d183,id1260) pageUp(d189,id1261) pageDown(d193,id1261) vip0(d197,id1263) vip1(d199,id1265) vip3(d201,id421) vip4(d203,id423) vip2(d205,id1267) depot6(d207,id1256) depot7(d211,id1256) depot8(d215,id1256) depot9(d219,id1256) depot10(d223,id1256) depot11(d227,id1256) pet(d231,id204) depot12(d233,id1256) depot13(d237,id1256) depot14(d241,id1256) depot15(d245,id1256) depot16(d249,id1256) depot17(d253,id1256) yiJianBtn(d257,id1273) getStarHun(d264,id1279) tuJianBtn(d271,id1282) pethead0(d283,id1286) pethead2(d292,id1286) pethead3(d301,id1286) pethead1(d310,id1286) pethead4(d319,id1286) pethead5(d328,id1286) chooseShow(d332,id1297) pet0(d336,id1256) pet4(d340,id1256) pet1(d344,id1256) pet2(d348,id1256) pet3(d352,id1256) starText0(d358,id1300) starText1(d359,id1300) starText2(d360,id1300) starText3(d361,id1300) starText4(d362,id1300) depotBtn(d363,id1319) petBtn(d389,id1323) bagBtn(d397,id1327) __id2_(d433,id142) smoney(d434,id1330) money(d435,id1331) starmoney(d436,id1332) showMc(d437,id170) name1(d451,id1333) heChenMc(d452,id1352) zhezhuMc(d504,id1356) newShow3(d506,id630) newShow1(d508,id1376) newShow4(d515,id1376)
+
+sprite480 frames=1 子对象45:
+  addPoint0(d4,id446) addBtn0(d5,id449) leftPointTxt(d13,id450) introduceTxt(d21,id452) __id53_(d22,id142) addPoint1(d25,id446) addBtn1(d26,id449) addPoint2(d34,id446) addBtn2(d35,id449) addPoint3(d43,id446) addPoint4(d44,id446) addPoint5(d45,id446) addBtn5(d46,id449) onClose(d54,id460) bar0(d61,id462) bar1(d65,id464) bar2(d67,id462) bar2(d69,id464) bar3(d73,id464) bar4(d75,id462) bar5(d79,id464) bar0(d81,id464) bar4(d83,id464) reduceBtn0(d85,id467) reduceBtn1(d92,id467) reduceBtn2(d99,id467) reduceBtn3(d106,id467) reduceBtn4(d113,id467) reduceBtn5(d120,id467) setBtn(d127,id471) sureBtn(d134,id473) setPropUI0(d141,id477) setPropUI1(d145,id477) setPropUI2(d149,id477) setPropUI3(d153,id477) setPropUI4(d157,id477) setPropUI5(d161,id477) addBtn3(d165,id449) addBtn4(d173,id449) valTxt1(d181,id478) valTxt2(d182,id478) valTxt3(d183,id478) valTxt5(d184,id478) valTxt4(d185,id478) valTxt0(d186,id478)
+
+sprite1149 frames=1 子对象40:
+  closeBtn(d17,id1042) pos8(d33,id1048) pos9(d37,id1048) pos10(d41,id1048) pos12(d45,id1048) pos11(d49,id1048) pos13(d53,id1048) pos15(d57,id1048) pos14(d61,id1048) pos0(d65,id1048) pos1(d69,id1048) pos2(d73,id1048) pos4(d77,id1048) pos3(d81,id1048) pos5(d85,id1048) pos7(d89,id1048) pos6(d93,id1048) bagBtn(d103,id1054) getBtn3(d121,id1083) getBtn2(d149,id1090) getBtn1(d185,id1097) getBtn0(d245,id1104) getBtn4(d287,id1111) suo0(d315,id254) suo1(d320,id254) suo2(d325,id254) suo3(d330,id254) suo4(d335,id254) buyBtn(d340,id1125) sellSuipianBtn(d359,id1131) getHunBtn(d366,id1134) onceGetBtn(d373,id1140) show1(d383,id280) show2(d397,id280) show3(d411,id280) show4(d425,id280) money(d450,id1148) smoney(d451,id1148) showMc(d452,id249) superShow(d460,id112)
+
+sprite683 frames=1 子对象36:
+  studyPoint2(d11,id674) prop2(d12,id674) charactor2(d13,id675) studyPoint1(d14,id674) prop1(d15,id674) charactor1(d16,id676) studyPoint0(d17,id674) prop0(d18,id674) charactor0(d19,id675) studyPoint3(d20,id674) prop3(d21,id674) charactor3(d22,id675) studyPoint4(d23,id674) prop4(d24,id674) charactor4(d25,id675) studyPoint5(d26,id674) prop5(d27,id674) charactor5(d28,id675) potention2(d29,id677) potention1(d32,id677) potention0(d35,id677) bar0(d40,id680) potention3(d42,id677) potention4(d45,id677) potention5(d48,id677) bar1(d51,id680) bar2(d53,id680) bar3(d55,id680) bar4(d57,id680) bar5(d59,id680) addHpTxt(d61,id681) addAttTxt(d62,id682) addDefTxt(d63,id681) addSpeAttTxt(d64,id681) addSpeDefTxt(d65,id681) addSpeedTxt(d66,id681)
+
+sprite1552 frames=1 子对象34:
+  num0(d5,id957) num1(d9,id957) num2(d13,id957) num3(d17,id957) num4(d21,id957) num5(d25,id957) num6(d29,id957) allNum0(d34,id957) allNum1(d38,id957) allNum2(d42,id957) allNum3(d46,id957) allNum4(d50,id957) allNum5(d54,id957) allNum6(d58,id957) powerEffect(d62,id1426) goPerfectEffect(d76,id1523) goPerfect(d78,id1528) expBar(d83,id1530) curExpTxt(d87,id1531) starTxt(d90,id1533) funcUp5(d91,id1409) studyTxt(d98,id1535) funcUp4(d99,id1409) funcUp3(d107,id1409) level(d114,id517) funcUp2(d122,id1409) emblem0(d127,id1541) emblem1(d129,id1541) characterTxt(d134,id1543) funcUp1(d135,id1409) funcUp0(d143,id1409) levelTxt(d147,id1545) newQuestMC1(d151,id1549) newQuestMC2(d173,id1551)
+
+sprite570 frames=1 子对象32:
+  prop1(d30,id504) prop2(d31,id504) prop3(d32,id504) prop4(d33,id504) prop5(d34,id504) prop0(d35,id504) changeProp0(d36,id505) changeProp1(d37,id505) changeProp2(d38,id505) changeProp3(d39,id505) changeProp4(d40,id505) changeProp5(d41,id505) upLevelNeed(d42,id506) changeVal(d43,id507) allProp(d44,id508) onClose(d53,id460) level(d60,id517) coinNum0(d68,id519) coinSelect(d69,id522) coinNum1(d76,id519) miSelect(d77,id522) itemSelect(d92,id522) coinNum2(d96,id534) swapItem(d104,id538) sure(d111,id544) actcionUI(d118,id553) newQuestMC2(d129,id556) newQuestMC3(d152,id558) newQuestMC4(d175,id561) newQuestMC6(d197,id564) newQuestMC7(d219,id567) newQuestMC5(d242,id569)
+
+sprite856 frames=1 子对象24:
+  nameTxt(d5,id722) evolveShadeMc(d6,id731) addHp(d8,id739) petRideIcon(d66,id742) tipArea(d72,id743) petTipUI(d74,id759) petSexIcon(d104,id768) twoMC(d107,id770) setFirstBtn(d111,id776) goFight(d125,id782) followBtn(d133,id788) takeBackBtn(d142,id808) petRideBtn(d157,id814) trainingBtn(d170,id823) putInStorageBtn(d182,id829) petRideBackBtn(d199,id837) goTxt(d217,id838) starLevel(d218,id484) fetterMC(d252,id840) changPetBtn(d256,id843) star0(d263,id855) star1(d268,id855) star2(d273,id855) star3(d278,id855)
+
+sprite1027 frames=1 子对象24:
+  petCanvas(d6,id207) petSex(d10,id1010) petId(d12,id1011) petName(d13,id1012) petLevel(d14,id1013) petChar(d15,id1014) petAtk(d27,id1013) petDef(d28,id1013) petSpAtk(d29,id1013) petSpDef(d30,id1013) petSpeed(d31,id1013) petHp(d32,id1013) levelBg(d35,id209) levelTxt(d37,id1024) closeBtn(d40,id244) petLevel2(d42,id1025) petDes(d43,id1026) flg_1(d44,id672) flg_0(d46,id672) flg_2(d48,id672) flg_3(d50,id672) flg_4(d52,id672) flg_6(d54,id672) flg_5(d56,id672)
+
+sprite1006 frames=1 子对象18:
+  closeBtn(d19,id973) iconMc(d33,id977) levelTip(d39,id979) expText(d40,id980) name1(d43,id982) up1(d45,id986) down1(d53,id989) input1(d60,id990) choose1(d64,id960) name2(d68,id982) up2(d70,id986) down2(d78,id989) input2(d85,id994) choose2(d89,id960) xiliText(d94,id999) willText(d95,id1000) okBtn(d96,id1005) newShow6(d103,id630)
+
+sprite378 frames=1 子对象13:
+  closeBtn(d16,id361) arrow1(d18,id364) arrow2(d22,id364) pageText(d26,id365) mc0(d27,id376) mc1(d37,id376) mc2(d47,id376) mc3(d57,id376) mc4(d67,id376) mc5(d77,id376) mc6(d87,id376) mc7(d97,id376) name1(d107,id377)
+
+sprite349 frames=1 子对象12:
+  pageBar(d11,id287) qualityItemNum(d21,id288) recovery(d22,id292) searchTxt(d36,id296) searchBtn(d37,id303) tab0(d42,id312) tab1(d44,id318) tab2(d46,id324) tab3(d48,id330) tab4(d50,id336) tab5(d52,id342) tab6(d54,id348)
+
+sprite660 frames=1 子对象11:
+  money(d2,id588) goBag(d48,id606) pet(d66,id204) bagBtn(d68,id612) pet0(d75,id617) pet4(d79,id617) pet1(d83,id617) pet2(d87,id617) pet3(d91,id617) _btnShow(d95,id630) starUpdateTip(d97,id659)
+
+sprite759 frames=1 子对象10:
+  petName(d5,id746) heightTxt(d7,id748) weightTxt(d9,id750) getWayTxt(d11,id752) introduceTxt(d14,id755) star0(d21,id717) star1(d23,id717) star2(d25,id717) star3(d27,id717) catchTimeTxt(d29,id758)
+
+sprite1383 frames=1 子对象9:
+  background(d1,id1379) annimation(d10,id185) nameTxt(d12,id187) __id50_(d13,id142) powerTxt(d14,id1380) angerTxt(d15,id1380) __id51_(d16,id142) categoryTxt(d21,id1382) hideTips(d22,id193)
+
+sprite196 frames=1 子对象8:
+  noSkillTips(d1,id173) background(d7,id182) annimation(d18,id185) nameTxt(d20,id187) powerTxt(d21,id188) angerTxt(d23,id188) __id52_(d29,id142) hideTips(d30,id193)
+
+sprite245 frames=1 子对象8:
+  petList(d1,id221) ssTxt(d68,id226) appraisalTxt(d70,id228) petContainer(d72,id230) bagButton(d74,id234) storageButton(d78,id238) appraisalButton(d82,id242) closeBtn(d86,id244)
+
+sprite438 frames=1 子对象8:
+  bgCell(d1,id413) openStateMC(d7,id424) selector(d9,id427) levelBg(d13,id430) levelTxt(d17,id431) HP(d18,id433) hpText(d20,id434) light(d21,id437)
+
+sprite881 frames=2 子对象8:
+  __id0_(d5,id142) exp(d6,id876) shuxing(d7,id877) value(d8,id878) __id1_(d9,id142) level(d10,id879) sell(d11,id880) nameT(d12,id187)
+
+sprite83 frames=1 子对象7:
+  abilityTabBtn(d1,id14) magicTabBtn(d3,id27) infoTabBtn(d5,id39) itemTabBtn(d7,id51) introduceBtn(d9,id54) skillTabBtn(d15,id66) newGuideMc(d17,id82)
+
+sprite411 frames=1 子对象6:
+  good2(d44,id403) goBtn2(d74,id407) goBtn3(d80,id407) goBtn0(d86,id407) goBtn1(d92,id407) closeBtn(d98,id410)
+
+sprite1499 frames=1 子对象6:
+  goBtn2(d66,id1494) goBtn3(d72,id1494) goBtn0(d78,id1494) goBtn1(d84,id1494) closeBtn(d90,id1495) jumpBtn(d96,id1498)
+
+sprite221 frames=1 子对象5:
+  ptCav1(d3,id216) ptCav3(d14,id216) ptCav2(d25,id216) nextBtn(d36,id220) prevBtn(d39,id220)
+
+sprite1319 frames=1 子对象5:
+  btn0(d1,id1307) btn1(d7,id1309) btn2(d13,id1311) btn3(d19,id1313) newShow2(d25,id1318)
+
+sprite1327 frames=1 子对象5:
+  btn0(d1,id1324) btn1(d7,id1325) btn2(d13,id1326) newShow5(d19,id1318) newShow6(d24,id1318)
+
+sprite216 frames=1 子对象4:
+  pc(d1,id207) levelBg(d5,id209) lv(d9,id213) s0(d10,id215)
+
+sprite376 frames=1 子对象4:
+  nameT(d6,id371) desc(d7,id372) level(d8,id373) iconMc(d9,id375)
+
+sprite698 frames=1 子对象4:
+  goBlood(d3,id691) goVipStore(d13,id695) newGuideMc(d23,id697) newGuideMc1(d47,id697)
+
+sprite287 frames=1 子对象3:
+  prevBtn(d1,id285) nextBtn(d5,id285) pageTxt(d9,id286)
+
+sprite586 frames=1 子对象3:
+  addVipBtn(d27,id576) coinTxt(d36,id579) confirmBtn(d37,id585)
+
+sprite907 frames=1 子对象3:
+  closeBtn(d3,id886) buyOneBtn(d5,id892) buyAllBtn(d7,id902)
+
+sprite1352 frames=1 子对象3:
+  closeBtn(d19,id1337) okBtn(d35,id1343) canclBtn(d42,id1347)
+
+sprite444 frames=1 子对象2:
+  content(d1,id438) fightStateMC(d23,id443)
+
+sprite553 frames=1 子对象2:
+  actionCancel(d3,id550) actionSure(d10,id552)
+
+sprite962 frames=1 子对象2:
+  nextBtn(d8,id285) prevBtn(d12,id285)
+
+sprite1221 frames=1 子对象2:
+  bgMc(d1,id135) vipMc(d7,id1220)
+
+sprite1323 frames=1 子对象2:
+  btn0(d1,id1320) btn1(d7,id1322)
+
+sprite143 frames=1 子对象1:
+  __id54_(d8,id142)
+
+sprite207 frames=1 子对象1:
+  iconHolder(d1,id204)
+
+sprite477 frames=1 子对象1:
+  setPropVal(d3,id476)
+
+sprite659 frames=1 子对象1:
+  ok(d20,id637)
+
+sprite892 frames=1 子对象1:
+  resetBtn(d1,id891)
+
+sprite902 frames=1 子对象1:
+  resetBtn(d1,id901)
+
+sprite1216 frames=1 子对象1:
+  closeBtn(d20,id1215)
+
+sprite1242 frames=1 子对象1:
+  closeBtn(d115,id1215)
+
+sprite1411 frames=1 子对象1:
+  resetBtn(d17,id1409)
+
+sprite1530 frames=1 子对象1:
+  bar(d3,id1198)

@@ -1,0 +1,18 @@
+{
+  "name": "seer2",
+  "version": "1.0.0",
+  "description": "约瑟传说（Seer2）网页复刻研究：内核线（重启 C# → TS 差分 oracle）、网页复刻线 SPA、SWF/矢量 IR 研究。学习用途，不二次分发版权素材。",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "dependencies": {
+    "@ruffle-rs/ruffle": "^0.7.1",
+    "fast-xml-parser": "^5.11.2",
+    "maxrects-packer": "^2.7.3",
+    "pngjs": "^7.0.0",
+    "puppeteer-core": "^25.13.0"
+  }
+}
